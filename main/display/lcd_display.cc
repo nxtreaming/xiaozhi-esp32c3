@@ -540,11 +540,10 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
 #include <stdlib.h>
 #include <time.h>
 #include <lvgl.h>
+#include <esp_system.h>
 
-#define SCREEN_WIDTH 240
-#define SCREEN_HEIGHT 240
-
-
+#define SCREEN_WIDTH 360
+#define SCREEN_HEIGHT 360
 
 // 眼睛结构体
 typedef struct eye_t {
@@ -633,24 +632,44 @@ void setup_eye_animations(eye_t *eye, int eye_size) {
     set_random_pupil_movement(eye->pupil, eye_size);
 }
 
+//#define  ENABLE_EYES_SIMULATION 1
 
-// void LcdDisplay::SetupUI() {
-//     DisplayLockGuard lock(this);
+#ifdef ENABLE_EYES_SIMULATION
+
+void LcdDisplay::SetupUI() {
+    DisplayLockGuard lock(this);
+
+    lv_obj_t *screen = lv_scr_act();
+    lv_obj_set_size(screen, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xf0f0f0), 0);
     
-//     lv_obj_t *screen = lv_scr_act();
-//     lv_obj_set_size(screen, SCREEN_WIDTH, SCREEN_HEIGHT);
-//     lv_obj_set_style_bg_color(screen, lv_color_hex(0xf0f0f0), 0);
+    srand(time(NULL));
     
-//     srand(time(NULL));
-    
-//     // 创建左眼
-//     eye_t left_eye = create_eye(screen, 40, 80, 70);
-//     setup_eye_animations(&left_eye, 70);
-    
-//     // 创建右眼
-//     eye_t right_eye = create_eye(screen, 140, 80, 70);
-//     setup_eye_animations(&right_eye, 70);
-// }
+    // 计算眼睛在360x360屏幕上的居中位置
+    int eye_size = 70;
+    int eye_spacing = 140;  // 两眼中心距离，增加到140像素
+    int screen_center_x = SCREEN_WIDTH / 2;   // 180
+    int screen_center_y = SCREEN_HEIGHT / 2;  // 180
+
+    // 左眼位置：屏幕中心向左偏移一半眼距，再减去眼睛半径
+    int left_eye_x = screen_center_x - eye_spacing/2 - eye_size/2;  // 180 - 50 - 35 = 95
+    int left_eye_y = screen_center_y - eye_size/2;  // 180 - 35 = 145
+
+    // 右眼位置：屏幕中心向右偏移一半眼距，再减去眼睛半径
+    int right_eye_x = screen_center_x + eye_spacing/2 - eye_size/2;  // 180 + 50 - 35 = 195
+    int right_eye_y = screen_center_y - eye_size/2;  // 180 - 35 = 145
+
+    // 创建左眼
+    eye_t left_eye = create_eye(screen, left_eye_x, left_eye_y, eye_size);
+    setup_eye_animations(&left_eye, eye_size);
+
+    // 创建右眼
+    eye_t right_eye = create_eye(screen, right_eye_x, right_eye_y, eye_size);
+    setup_eye_animations(&right_eye, eye_size);
+}
+
+#else
+
 void  LcdDisplay:: SetupUI() {
     DisplayLockGuard lock(this);
     
@@ -751,6 +770,8 @@ void  LcdDisplay:: SetupUI() {
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
 
 }
+#endif /* !ENABLE_EYES_SIMULATION */
+
 #endif
 
 // void  LcdDisplay:: SetupBluetoothUI() {    
@@ -1047,4 +1068,142 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(theme_name);
+}
+
+void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y) {
+    DisplayLockGuard lock(this);
+
+    ESP_LOGI(TAG, "Attempting to show GIF at position (%d, %d), size: %lu bytes", x, y, (unsigned long)gif_size);
+
+    // Validate input parameters
+    if (gif_data == nullptr || gif_size == 0) {
+        ESP_LOGE(TAG, "Invalid GIF data: data=%p, size=%lu", gif_data, (unsigned long)gif_size);
+        return;
+    }
+
+    // Validate GIF header
+    if (gif_size < 6 || memcmp(gif_data, "GIF", 3) != 0) {
+        ESP_LOGE(TAG, "Invalid GIF header, size=%lu", (unsigned long)gif_size);
+        return;
+    }
+
+    ESP_LOGI(TAG, "GIF header validation passed: %.6s", gif_data);
+
+    // Hide existing GIF if any
+    if (gif_img_ != nullptr) {
+        lv_obj_del(gif_img_);
+        gif_img_ = nullptr;
+    }
+
+#if LV_USE_GIF
+    // Check available memory before creating GIF
+    uint32_t free_heap = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "Free heap before GIF creation: %lu bytes", free_heap);
+
+    // Estimate memory needed for GIF (now using 32x32 pixel GIF)
+    uint32_t estimated_memory = 4 * 32 * 32; // 4 bytes per pixel for 32x32 GIF (~4KB)
+
+    if (free_heap < estimated_memory + 10000) { // 10KB safety margin
+        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 10KB safety, have %lu", estimated_memory, free_heap);
+        // Fall through to placeholder creation
+        goto create_placeholder;
+    }
+
+    // Try to create a GIF object using LVGL's GIF decoder
+    gif_img_ = lv_gif_create(lv_screen_active());
+    if (gif_img_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create GIF object");
+        goto create_placeholder;
+    }
+
+    // Remove debug border - GIF is working properly
+    // lv_obj_set_style_border_width(gif_img_, 2, 0);
+    // lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x00FF00), 0);
+    // lv_obj_set_style_border_opa(gif_img_, LV_OPA_COVER, 0);
+
+    // Create image descriptor for the GIF data
+    lv_img_dsc_t img_dsc;
+    img_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    img_dsc.header.cf = LV_COLOR_FORMAT_UNKNOWN; // Let LVGL auto-detect format
+    img_dsc.header.flags = 0;
+    img_dsc.header.w = 0; // Will be determined by decoder
+    img_dsc.header.h = 0; // Will be determined by decoder
+    img_dsc.header.stride = 0; // Will be determined by decoder
+    img_dsc.data = gif_data;
+    img_dsc.data_size = gif_size;
+
+    // Set the GIF source with error handling
+    ESP_LOGI(TAG, "Setting GIF source...");
+    lv_gif_set_src(gif_img_, &img_dsc);
+
+    // Note: LVGL doesn't provide lv_gif_get_src, so we assume success if no crash occurs
+
+    // Position the GIF - center for testing
+    if (x == 0 && y == 0) {
+        // Center position for 32x32 GIF: (360-32)/2 = 164
+        lv_obj_set_pos(gif_img_, 164, 164);
+        ESP_LOGI(TAG, "GIF positioned at center (164, 164) for testing");
+    } else {
+        lv_obj_set_pos(gif_img_, x, y);
+        ESP_LOGI(TAG, "GIF positioned at custom location (%d, %d)", x, y);
+    }
+
+    // Ensure GIF is visible
+    lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_CLICKABLE);  // Make it interactive for testing
+
+    // Bring to front
+    lv_obj_move_foreground(gif_img_);
+
+    ESP_LOGI(TAG, "GIF animation created and started successfully");
+    ESP_LOGI(TAG, "GIF size: 32x32, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
+    ESP_LOGI(TAG, "GIF parent: %p, screen: %p", lv_obj_get_parent(gif_img_), lv_screen_active());
+    ESP_LOGI(TAG, "Free heap after GIF creation: %lu bytes", (unsigned long)esp_get_free_heap_size());
+    return;
+
+create_placeholder:
+#else
+create_placeholder:
+#endif
+    // Fallback: create a placeholder if GIF support is not enabled or failed
+    ESP_LOGW(TAG, "Creating GIF placeholder (GIF support disabled or failed)");
+
+    gif_img_ = lv_obj_create(lv_screen_active());
+    if (gif_img_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create fallback placeholder");
+        return;
+    }
+
+    // Set size and style for the placeholder (match GIF size)
+    lv_obj_set_size(gif_img_, 16, 16);
+    lv_obj_set_style_bg_color(gif_img_, lv_color_hex(0xFF6B6B), 0);
+    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(gif_img_, 2, 0);
+    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_radius(gif_img_, 8, 0);
+
+    // Position the placeholder
+    if (x == 0 && y == 0) {
+        lv_obj_set_pos(gif_img_, 292, 292);  // Same as GIF position
+    } else {
+        lv_obj_set_pos(gif_img_, x, y);
+    }
+
+    // Add a label to indicate this is a GIF placeholder
+    lv_obj_t* label = lv_label_create(gif_img_);
+    lv_label_set_text(label, "GIF\nOK");
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_center(label);
+
+    ESP_LOGI(TAG, "GIF placeholder created (decoder temporarily disabled)");
+}
+
+void LcdDisplay::HideGif() {
+    DisplayLockGuard lock(this);
+
+    if (gif_img_ != nullptr) {
+        ESP_LOGI(TAG, "Hiding GIF animation");
+        lv_obj_del(gif_img_);
+        gif_img_ = nullptr;
+    }
 }

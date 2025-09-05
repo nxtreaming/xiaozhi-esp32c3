@@ -20,6 +20,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "main.cc"
             "YT_UART.cc"
             "PFS123.cc"
+            "gif_test.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")

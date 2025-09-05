@@ -27,6 +27,11 @@ public:
     virtual void SetIcon(const char* icon);
     virtual void SetTheme(const std::string& theme_name);
 
+    // GIF display methods
+    virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
+    virtual void HideGif();
+    virtual bool IsGifPlaying() const;
+
     // virtual void SetupBluetoothUI();
     // virtual void UpdateBluetoothStatus(bool is_connected, char* device_name);
     virtual std::string GetTheme() { return current_theme_name_; }
@@ -50,6 +55,7 @@ protected:
     lv_obj_t *battery_label_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
     lv_obj_t* low_battery_popup_ = nullptr;
+    lv_obj_t* gif_img_ = nullptr;
 
     // //加 蓝牙模式
     // lv_obj_t* bluetooth_icon_  = nullptr;

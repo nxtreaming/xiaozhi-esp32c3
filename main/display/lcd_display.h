@@ -52,6 +52,10 @@ public:
 
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+
+    // GIF display methods
+    virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0) override;
+    virtual void HideGif() override;
 };
 
 // RGB LCD显示器

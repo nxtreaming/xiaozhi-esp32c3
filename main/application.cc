@@ -17,7 +17,9 @@
 #include <arpa/inet.h>
 #include <esp_app_desc.h>
 #include <driver/uart.h>
+#include <esp_heap_caps.h>
 #include "YT_UART.h"
+#include "gif_test.h"
 #define TAG "Application"
 
 static const char *const STATE_STRINGS[] = {
@@ -654,6 +656,13 @@ void Application::Start()
 
     SetDeviceState(kDeviceStateIdle);  //xkDeviceStateIdle
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
+
+    // 系统启动完成后，延迟3秒显示测试GIF
+    background_task_->Schedule([this]() {
+        vTaskDelay(pdMS_TO_TICKS(3000));  // 等待3秒让系统稳定
+        ESP_LOGI(TAG, "System startup complete, showing test GIF");
+        ShowTestGif();
+    });
     // }
 }
 
@@ -682,6 +691,28 @@ void Application::OnClockTimer()
                     strftime(time_str, sizeof(time_str), "%H:%M  ", localtime(&now));
                     Board::GetInstance().GetDisplay()->SetStatus(time_str); });
             }
+        }
+    }
+
+    // GIF测试：每45秒切换一次显示/隐藏状态（避开时钟更新时间）
+    if (device_state_ == kDeviceStateIdle && clock_ticks_ > 15) // 启动15秒后开始
+    {
+        // 使用45秒周期，避开10秒的时钟更新周期
+        if (clock_ticks_ % 45 == 0) // 每45秒
+        {
+            // 延迟2秒执行，避免与时钟更新冲突
+            background_task_->Schedule([this]() {
+                vTaskDelay(pdMS_TO_TICKS(2000));  // 延迟2秒
+                if (device_state_ == kDeviceStateIdle) { // 再次检查状态
+                    if (IsGifPlaying()) {
+                        ESP_LOGI(TAG, "Auto hiding test GIF (delayed)");
+                        HideTestGif();
+                    } else {
+                        ESP_LOGI(TAG, "Auto showing test GIF (delayed)");
+                        ShowTestGif();
+                    }
+                }
+            });
         }
     }
 }
@@ -1070,4 +1101,117 @@ bool Application::CanEnterSleepMode()
 
     // Now it is safe to enter sleep mode
     return true;
+}
+
+void Application::PrintMemoryInfo()
+{
+    ESP_LOGI(TAG, "=== ESP32 Memory Information ===");
+
+    // Internal RAM
+    uint32_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t internal_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    uint32_t internal_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+
+    ESP_LOGI(TAG, "Internal RAM - Total: %lu, Free: %lu, Min: %lu, Used: %lu",
+             internal_total, internal_free, internal_min, internal_total - internal_free);
+
+    // SPIRAM (if available)
+    uint32_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    uint32_t spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (spiram_total > 0) {
+        ESP_LOGI(TAG, "SPIRAM - Total: %lu, Free: %lu, Used: %lu",
+                 spiram_total, spiram_free, spiram_total - spiram_free);
+    } else {
+        ESP_LOGI(TAG, "SPIRAM - Not available");
+    }
+
+    // DMA capable memory
+    uint32_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    uint32_t dma_total = heap_caps_get_total_size(MALLOC_CAP_DMA);
+    ESP_LOGI(TAG, "DMA Memory - Total: %lu, Free: %lu, Used: %lu",
+             dma_total, dma_free, dma_total - dma_free);
+
+    // Overall heap
+    uint32_t total_free = esp_get_free_heap_size();
+    uint32_t total_min = esp_get_minimum_free_heap_size();
+    ESP_LOGI(TAG, "Total Heap - Free: %lu, Min: %lu", total_free, total_min);
+
+    // Largest free block
+    uint32_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Largest free block (Internal): %lu bytes", largest_block);
+
+    ESP_LOGI(TAG, "================================");
+}
+
+void Application::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
+{
+    // Print detailed memory information (only once for debugging)
+    static bool memory_info_printed = false;
+    if (!memory_info_printed) {
+        PrintMemoryInfo();
+        memory_info_printed = true;
+    }
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        ESP_LOGI(TAG, "Application: Showing GIF animation");
+        display->ShowGif(gif_data, gif_size, x, y);
+
+        // Check memory after GIF creation
+        ESP_LOGI(TAG, "Application: Memory after GIF - Free: %lu", (unsigned long)esp_get_free_heap_size());
+    } else {
+        ESP_LOGE(TAG, "Display not available for GIF");
+    }
+}
+
+void Application::HideGif()
+{
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        ESP_LOGI(TAG, "Application: Hiding GIF animation");
+        display->HideGif();
+    }
+}
+
+bool Application::IsGifPlaying() const
+{
+    auto display = Board::GetInstance().GetDisplay();
+    return display ? display->IsGifPlaying() : false;
+}
+
+void Application::ShowTestGif()
+{
+    // 只在空闲状态下显示GIF，避免干扰其他功能
+    if (device_state_ != kDeviceStateIdle) {
+        ESP_LOGW(TAG, "Device not idle, skipping GIF test");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Showing test GIF placeholder in corner of screen");
+
+    // 使用测试GIF数据，显示在右下角避免冲突
+    ShowGif(test_gif_data, test_gif_size, 0, 0);  // 0,0会被映射到右下角
+
+    // 显示提示信息（较短时间避免干扰）
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->ShowNotification("GIF Test", 1500);  // 缩短到1.5秒
+    }
+
+    ESP_LOGI(TAG, "Test GIF placeholder displayed in corner (non-intrusive mode)");
+}
+
+void Application::HideTestGif()
+{
+    ESP_LOGI(TAG, "Hiding test GIF placeholder");
+
+    HideGif();
+
+    // 显示提示信息
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->ShowNotification("GIF Test Stopped", 2000);
+    }
+
+    ESP_LOGI(TAG, "Test GIF placeholder hidden");
 }

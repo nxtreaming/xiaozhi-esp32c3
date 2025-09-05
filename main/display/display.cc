@@ -259,3 +259,17 @@ void Display::SetTheme(const std::string& theme_name) {
     Settings settings("display", true);
     settings.SetString("theme", theme_name);
 }
+
+void Display::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y) {
+    // Default implementation - does nothing
+    // Override in derived classes
+}
+
+void Display::HideGif() {
+    // Default implementation - does nothing
+    // Override in derived classes
+}
+
+bool Display::IsGifPlaying() const {
+    return gif_img_ != nullptr;
+}

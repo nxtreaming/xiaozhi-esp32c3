@@ -50,8 +50,8 @@
 #define EP1331S 0
 #define EP1531S 0
 #define EP1531T 0
-#define EP1831T 0
-#define E2031CP 1
+#define EP1831T 1
+#define E2031CP 0
 #define E2431BP 0
 #define E2831BP 0
 #define E3231BP 0
