@@ -69,6 +69,10 @@ Application::~Application()
 
 void Application::CheckNewVersion()
 {
+    // Disable OTA version checking to prevent automatic upgrades
+    ESP_LOGI(TAG, "OTA version checking disabled by user");
+    return;
+
     auto &board = Board::GetInstance();
     auto display = board.GetDisplay();
     // Check if there is a new firmware version available
