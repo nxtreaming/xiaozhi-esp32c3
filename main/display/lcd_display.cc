@@ -542,8 +542,8 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
 #include <lvgl.h>
 #include <esp_system.h>
 
-#define SCREEN_WIDTH 360
-#define SCREEN_HEIGHT 360
+#define SCREEN_WIDTH 412
+#define SCREEN_HEIGHT 412
 
 // 眼睛结构体
 typedef struct eye_t {
@@ -632,7 +632,7 @@ void setup_eye_animations(eye_t *eye, int eye_size) {
     set_random_pupil_movement(eye->pupil, eye_size);
 }
 
-//#define  ENABLE_EYES_SIMULATION 1
+#define  ENABLE_EYES_SIMULATION 1
 
 #ifdef ENABLE_EYES_SIMULATION
 
@@ -645,11 +645,11 @@ void LcdDisplay::SetupUI() {
     
     srand(time(NULL));
     
-    // 计算眼睛在360x360屏幕上的居中位置
+    // 计算眼睛在412x412屏幕上的居中位置
     int eye_size = 70;
     int eye_spacing = 140;  // 两眼中心距离，增加到140像素
-    int screen_center_x = SCREEN_WIDTH / 2;   // 180
-    int screen_center_y = SCREEN_HEIGHT / 2;  // 180
+    int screen_center_x = SCREEN_WIDTH / 2;   // 206
+    int screen_center_y = SCREEN_HEIGHT / 2;  // 206
 
     // 左眼位置：屏幕中心向左偏移一半眼距，再减去眼睛半径
     int left_eye_x = screen_center_x - eye_spacing/2 - eye_size/2;  // 180 - 50 - 35 = 95
@@ -1100,11 +1100,12 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     uint32_t free_heap = esp_get_free_heap_size();
     ESP_LOGI(TAG, "Free heap before GIF creation: %lu bytes", free_heap);
 
-    // Estimate memory needed for GIF (now using 32x32 pixel GIF)
-    uint32_t estimated_memory = 4 * 32 * 32; // 4 bytes per pixel for 32x32 GIF (~4KB)
+    // Estimate memory needed for GIF (ESP32-S3 with PSRAM can handle much larger GIFs)
+    uint32_t estimated_memory = 4 * 128 * 128; // Support up to 128x128 GIF (~64KB)
 
-    if (free_heap < estimated_memory + 10000) { // 10KB safety margin
-        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 10KB safety, have %lu", estimated_memory, free_heap);
+    // With PSRAM, we have much more memory available
+    if (free_heap < estimated_memory + 50000) { // 50KB safety margin for PSRAM system
+        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 50KB safety, have %lu", estimated_memory, free_heap);
         // Fall through to placeholder creation
         goto create_placeholder;
     }
@@ -1116,10 +1117,10 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
         goto create_placeholder;
     }
 
-    // Remove debug border - GIF is working properly
-    // lv_obj_set_style_border_width(gif_img_, 2, 0);
-    // lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x00FF00), 0);
-    // lv_obj_set_style_border_opa(gif_img_, LV_OPA_COVER, 0);
+    // Add debug border to verify GIF object creation
+    lv_obj_set_style_border_width(gif_img_, 3, 0);
+    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x00FF00), 0);  // Green border
+    lv_obj_set_style_border_opa(gif_img_, LV_OPA_COVER, 0);
 
     // Create image descriptor for the GIF data
     lv_img_dsc_t img_dsc;
@@ -1140,9 +1141,9 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
 
     // Position the GIF - center for testing
     if (x == 0 && y == 0) {
-        // Center position for 32x32 GIF: (360-32)/2 = 164
-        lv_obj_set_pos(gif_img_, 164, 164);
-        ESP_LOGI(TAG, "GIF positioned at center (164, 164) for testing");
+        // Center position for 4x4 GIF on 412x412 screen: (412-4)/2 = 204
+        lv_obj_set_pos(gif_img_, 204, 204);
+        ESP_LOGI(TAG, "GIF positioned at center (204, 204) for testing");
     } else {
         lv_obj_set_pos(gif_img_, x, y);
         ESP_LOGI(TAG, "GIF positioned at custom location (%d, %d)", x, y);
@@ -1156,7 +1157,7 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     lv_obj_move_foreground(gif_img_);
 
     ESP_LOGI(TAG, "GIF animation created and started successfully");
-    ESP_LOGI(TAG, "GIF size: 32x32, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
+    ESP_LOGI(TAG, "GIF size: 4x4, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
     ESP_LOGI(TAG, "GIF parent: %p, screen: %p", lv_obj_get_parent(gif_img_), lv_screen_active());
     ESP_LOGI(TAG, "Free heap after GIF creation: %lu bytes", (unsigned long)esp_get_free_heap_size());
     return;
@@ -1184,7 +1185,7 @@ create_placeholder:
 
     // Position the placeholder
     if (x == 0 && y == 0) {
-        lv_obj_set_pos(gif_img_, 292, 292);  // Same as GIF position
+        lv_obj_set_pos(gif_img_, 174, 174);  // Same as GIF position (412-64)/2 = 174
     } else {
         lv_obj_set_pos(gif_img_, x, y);
     }

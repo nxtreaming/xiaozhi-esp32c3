@@ -19,7 +19,12 @@
 #include "PFS123.h"
 #define TAG "main"
 void set_gpio() {
+#ifdef CONFIG_IDF_TARGET_ESP32C3
     esp_efuse_write_field_bit(ESP_EFUSE_VDD_SPI_AS_GPIO);
+#elif CONFIG_IDF_TARGET_ESP32S3
+    // ESP32-S3 doesn't need this eFuse setting for GPIO11
+    // GPIO11 can be used directly as GPIO on ESP32-S3
+#endif
      // 配置GPIO11为输出
      gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << GPIO_NUM_11),
