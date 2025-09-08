@@ -9,6 +9,7 @@
 #include "font_awesome_symbols.h"
 #include "iot/thing_manager.h"
 #include "assets/lang_config.h"
+#include "YT_UART.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -522,7 +523,8 @@ void Application::Start()
         //     ESP_LOGI(TAG, "Ignore JSON in Bluetooth mode");
         //     return;  // 蓝牙模式下不处理任何协议指令
         // }
-        if (yt_command_flag == 0) { //test
+        // Only ignore JSON when explicitly in Bluetooth_mode, not when flag is just cleared (0)
+        if (yt_command_flag == Bluetooth_mode) { //test
                 ESP_LOGI(TAG, "Ignore JSON in Bluetooth mode");
                 return;  // 蓝牙模式下不处理任何协议指令
         }
