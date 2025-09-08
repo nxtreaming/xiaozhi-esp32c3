@@ -69,10 +69,6 @@ Application::~Application()
 
 void Application::CheckNewVersion()
 {
-    // Disable OTA version checking to prevent automatic upgrades
-    ESP_LOGI(TAG, "OTA version checking disabled by user");
-    return;
-
     auto &board = Board::GetInstance();
     auto display = board.GetDisplay();
     // Check if there is a new firmware version available
@@ -97,7 +93,7 @@ void Application::CheckNewVersion()
         }
         retry_count = 0;
 
-        if (ota_.HasNewVersion())
+        if (false && ota_.HasNewVersion())
         {
             Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "happy", Lang::Sounds::P3_UPGRADE);
             // Wait for the chat state to be idle
