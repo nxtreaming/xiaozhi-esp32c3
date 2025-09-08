@@ -93,6 +93,7 @@ void Application::CheckNewVersion()
         }
         retry_count = 0;
 
+        // We disable OTA upgrade in develop phase
         if (false && ota_.HasNewVersion())
         {
             Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "happy", Lang::Sounds::P3_UPGRADE);
