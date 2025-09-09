@@ -29,6 +29,7 @@ public:
 
     // GIF display methods
     virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
+    virtual void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void HideGif();
     virtual bool IsGifPlaying() const;
 

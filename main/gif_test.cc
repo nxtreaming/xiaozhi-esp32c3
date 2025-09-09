@@ -5,6 +5,7 @@
 #include "gif_test.h"
 #include "application.h"
 #include <esp_log.h>
+#include <cstring>
 
 static const char* TAG = "GifTest";
 
@@ -19678,7 +19679,6 @@ void test_gif_display() {
 
     auto& app = Application::GetInstance();
 
-    // ��ʾ��ʵ��GIF��������ʾ
     app.ShowGif(test_gif_data, test_gif_size, 0, 0);
 
     ESP_LOGI(TAG, "Real GIF test completed. You should see the actual ag.gif animation!");

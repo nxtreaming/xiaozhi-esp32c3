@@ -1123,8 +1123,27 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
         goto create_placeholder;
     }
 
-    // 移除调试边框 - 用户要求去掉绿色边缘
+    // 完全移除边框和所有可能的装饰
+    // 重置所有可能的边框和装饰样式，使用简单的样式设置避免枚举警告
     lv_obj_set_style_border_width(gif_img_, 0, 0);
+    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(gif_img_, 0, 0);
+    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(gif_img_, 0, 0);
+    lv_obj_set_style_shadow_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(gif_img_, 0, 0);
+    lv_obj_set_style_margin_all(gif_img_, 0, 0);
+    // 确保背景透明，只显示GIF内容
+    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
+    // 移除任何可能的默认边框颜色
+    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_outline_color(gif_img_, lv_color_hex(0x000000), 0);
+
+    // 额外确保：清除所有可能的样式继承
+    lv_obj_remove_style_all(gif_img_);
+    // 重新应用无边框样式
+    lv_obj_set_style_border_width(gif_img_, 0, 0);
+    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
 
     // Create image descriptor for the GIF data
     lv_img_dsc_t img_dsc;
@@ -1179,12 +1198,14 @@ create_placeholder:
         return;
     }
 
-    // Set size and style for the placeholder (match GIF size)
+    // Set size and style for the placeholder (match GIF size) - 移除边框
     lv_obj_set_size(gif_img_, 16, 16);
     lv_obj_set_style_bg_color(gif_img_, lv_color_hex(0xFF6B6B), 0);
     lv_obj_set_style_bg_opa(gif_img_, LV_OPA_90, 0);
-    lv_obj_set_style_border_width(gif_img_, 2, 0);
-    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_width(gif_img_, 0, 0);  // 移除边框
+    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(gif_img_, 0, 0);
+    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_radius(gif_img_, 8, 0);
 
     // Position the placeholder
@@ -1341,14 +1362,13 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
     }
 
     // 配置HTTP客户端
-    esp_http_client_config_t config = {
-        .url = url,
-        .event_handler = http_event_handler,
-        .user_data = &download_data,
-        .timeout_ms = 30000, // 30秒超时
-        .buffer_size = 4096,
-        .buffer_size_tx = 1024,
-    };
+    esp_http_client_config_t config = {};
+    config.url = url;
+    config.event_handler = http_event_handler;
+    config.user_data = &download_data;
+    config.timeout_ms = 30000; // 30秒超时
+    config.buffer_size = 4096;
+    config.buffer_size_tx = 1024;
 
     // 如果是HTTPS，启用证书验证
     if (strncmp(url, "https://", 8) == 0) {
@@ -1378,8 +1398,8 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
 
             // 验证GIF文件头
             if (download_data.data_len >= 6 &&
-                memcmp(download_data.buffer, "GIF87a", 6) == 0 ||
-                memcmp(download_data.buffer, "GIF89a", 6) == 0) {
+                (memcmp(download_data.buffer, "GIF87a", 6) == 0 ||
+                 memcmp(download_data.buffer, "GIF89a", 6) == 0)) {
 
                 ESP_LOGI(TAG, "Valid GIF file detected, displaying...");
 

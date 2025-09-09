@@ -265,6 +265,11 @@ void Display::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y) {
     // Override in derived classes
 }
 
+void Display::ShowGifFromUrl(const char* url, int x, int y) {
+    // Default implementation - does nothing
+    // Override in derived classes
+}
+
 void Display::HideGif() {
     // Default implementation - does nothing
     // Override in derived classes
