@@ -28,6 +28,11 @@ protected:
 
     DisplayFonts fonts_;
 
+    // GIF buffer management for dynamically allocated data
+    uint8_t* gif_buffer_ = nullptr;
+    size_t gif_buffer_size_ = 0;
+    lv_img_dsc_t* gif_img_dsc_ = nullptr;  // Persistent image descriptor
+
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -57,6 +62,10 @@ public:
     virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0) override;
     void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void HideGif() override;
+
+private:
+    // Internal method for showing GIF with managed buffer
+    void ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
 };
 
 // RGB LCD显示器

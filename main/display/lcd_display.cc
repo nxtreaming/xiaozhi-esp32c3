@@ -230,6 +230,25 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
 }
 
 LcdDisplay::~LcdDisplay() {
+    // 首先清理 GIF 对象和相关缓冲区
+    if (gif_img_ != nullptr) {
+        lv_obj_del(gif_img_);
+        gif_img_ = nullptr;
+    }
+
+    // 清理 GIF 缓冲区
+    if (gif_buffer_ != nullptr) {
+        heap_caps_free(gif_buffer_);
+        gif_buffer_ = nullptr;
+        gif_buffer_size_ = 0;
+    }
+
+    // 清理 GIF 图像描述符
+    if (gif_img_dsc_ != nullptr) {
+        delete gif_img_dsc_;
+        gif_img_dsc_ = nullptr;
+    }
+
     // 然后再清理 LVGL 对象
     if (content_ != nullptr) {
         lv_obj_del(content_);
@@ -1095,11 +1114,17 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
 
     ESP_LOGI(TAG, "GIF header validation passed: %.6s", gif_data);
 
-    // Hide existing GIF if any
-    if (gif_img_ != nullptr) {
-        lv_obj_del(gif_img_);
-        gif_img_ = nullptr;
-    }
+    // Log memory before operations
+    uint32_t free_heap_before = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "Free heap before GIF operations: %lu bytes", free_heap_before);
+
+    // Hide existing GIF if any - this will properly clean up resources
+    HideGif();
+
+    // For this implementation, we'll use the data directly without copying
+    // This works for both static data (embedded arrays) and dynamic data
+    // as long as the caller ensures the data remains valid during display
+    const uint8_t* gif_data_to_use = gif_data;
 
 #if LV_USE_GIF
     // Check available memory before creating GIF
@@ -1145,20 +1170,21 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     lv_obj_set_style_border_width(gif_img_, 0, 0);
     lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
 
-    // Create image descriptor for the GIF data
-    lv_img_dsc_t img_dsc;
-    img_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    img_dsc.header.cf = LV_COLOR_FORMAT_UNKNOWN; // Let LVGL auto-detect format
-    img_dsc.header.flags = 0;
-    img_dsc.header.w = 0; // Will be determined by decoder
-    img_dsc.header.h = 0; // Will be determined by decoder
-    img_dsc.header.stride = 0; // Will be determined by decoder
-    img_dsc.data = gif_data;
-    img_dsc.data_size = gif_size;
+    // Create persistent image descriptor for the GIF data
+    // This needs to remain valid for the entire lifetime of the GIF
+    gif_img_dsc_ = new lv_img_dsc_t;
+    gif_img_dsc_->header.magic = LV_IMAGE_HEADER_MAGIC;
+    gif_img_dsc_->header.cf = LV_COLOR_FORMAT_UNKNOWN; // Let LVGL auto-detect format
+    gif_img_dsc_->header.flags = 0;
+    gif_img_dsc_->header.w = 0; // Will be determined by decoder
+    gif_img_dsc_->header.h = 0; // Will be determined by decoder
+    gif_img_dsc_->header.stride = 0; // Will be determined by decoder
+    gif_img_dsc_->data = gif_data_to_use;
+    gif_img_dsc_->data_size = gif_size;
 
     // Set the GIF source with error handling
     ESP_LOGI(TAG, "Setting GIF source...");
-    lv_gif_set_src(gif_img_, &img_dsc);
+    lv_gif_set_src(gif_img_, gif_img_dsc_);
 
     // Note: LVGL doesn't provide lv_gif_get_src, so we assume success if no crash occurs
 
@@ -1229,9 +1255,75 @@ void LcdDisplay::HideGif() {
 
     if (gif_img_ != nullptr) {
         ESP_LOGI(TAG, "Hiding GIF animation");
+
+        // Force LVGL to process any pending operations before deletion
+        lv_refr_now(display_);
+
+        // Delete the GIF object - this should free all associated resources
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
+
+        // Clean up any dynamically allocated GIF buffer
+        if (gif_buffer_ != nullptr) {
+            ESP_LOGI(TAG, "Freeing GIF buffer: %zu bytes", gif_buffer_size_);
+            heap_caps_free(gif_buffer_);
+            gif_buffer_ = nullptr;
+            gif_buffer_size_ = 0;
+        }
+
+        // Clean up GIF image descriptor
+        if (gif_img_dsc_ != nullptr) {
+            delete gif_img_dsc_;
+            gif_img_dsc_ = nullptr;
+        }
+
+        // Force garbage collection to ensure memory is freed
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        ESP_LOGI(TAG, "Memory after GIF cleanup - used: %d%%, frag: %d%%",
+                 mon.used_pct, mon.frag_pct);
     }
+}
+
+void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, int x, int y) {
+    DisplayLockGuard lock(this);
+
+    ESP_LOGI(TAG, "Showing GIF with managed buffer: %zu bytes", gif_size);
+
+    // Validate input parameters
+    if (gif_data == nullptr || gif_size == 0) {
+        ESP_LOGE(TAG, "Invalid managed GIF data: data=%p, size=%zu", gif_data, gif_size);
+        if (gif_data != nullptr) {
+            heap_caps_free(gif_data);
+        }
+        return;
+    }
+
+    // Validate GIF header
+    if (gif_size < 6 || memcmp(gif_data, "GIF", 3) != 0) {
+        ESP_LOGE(TAG, "Invalid managed GIF header, size=%zu", gif_size);
+        heap_caps_free(gif_data);
+        return;
+    }
+
+    // Hide existing GIF if any - this will clean up any previous buffer
+    HideGif();
+
+    // Store the buffer for lifecycle management
+    gif_buffer_ = gif_data;
+    gif_buffer_size_ = gif_size;
+
+    // Now call the regular ShowGif method with the managed data
+    // We temporarily set gif_buffer_ to nullptr to prevent double cleanup
+    uint8_t* temp_buffer = gif_buffer_;
+    gif_buffer_ = nullptr;
+
+    ShowGif(temp_buffer, gif_size, x, y);
+
+    // Restore the buffer pointer for proper cleanup later
+    gif_buffer_ = temp_buffer;
+
+    ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
 }
 
 // HTTP下载数据结构
@@ -1403,8 +1495,12 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
 
                 ESP_LOGI(TAG, "Valid GIF file detected, displaying...");
 
-                // 调用现有的ShowGif函数显示GIF
-                ShowGif(download_data.buffer, download_data.data_len, x, y);
+                // 使用管理缓冲区的方法显示GIF
+                // 这会转移缓冲区的所有权给显示系统
+                ShowGifWithManagedBuffer(download_data.buffer, download_data.data_len, x, y);
+
+                // 重要：缓冲区所有权已转移，不要在这里释放
+                download_data.buffer = nullptr;
 
             } else {
                 ESP_LOGE(TAG, "Downloaded file is not a valid GIF");
@@ -1420,10 +1516,11 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
     // 清理资源
     esp_http_client_cleanup(client);
 
-    // 注意：不要立即释放buffer，因为LVGL可能还在使用它
-    // 在实际应用中，应该在GIF显示完成后再释放
-    // 这里为了简化，我们暂时不释放，让系统自动回收
-    // heap_caps_free(download_data.buffer);
+    // 释放下载缓冲区（如果所有权没有被转移）
+    if (download_data.buffer != nullptr) {
+        heap_caps_free(download_data.buffer);
+        ESP_LOGI(TAG, "Download buffer freed (not used for GIF)");
+    }
 
     ESP_LOGI(TAG, "GIF download and display process completed");
 }
