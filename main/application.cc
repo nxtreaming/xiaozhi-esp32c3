@@ -1167,6 +1167,30 @@ void Application::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y
     }
 }
 
+void Application::ShowGifFromUrl(const char* url, int x, int y)
+{
+    if (url == nullptr || strlen(url) == 0) {
+        ESP_LOGE(TAG, "Invalid URL provided for GIF display");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Application: Starting GIF download from URL: %s", url);
+
+    // Print memory information
+    PrintMemoryInfo();
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        ESP_LOGI(TAG, "Application: Downloading and showing GIF from URL");
+        display->ShowGifFromUrl(url, x, y);
+
+        // Check memory after download attempt
+        ESP_LOGI(TAG, "Application: Memory after GIF download - Free: %lu", (unsigned long)esp_get_free_heap_size());
+    } else {
+        ESP_LOGE(TAG, "Display not available for GIF URL download");
+    }
+}
+
 void Application::HideGif()
 {
     auto display = Board::GetInstance().GetDisplay();

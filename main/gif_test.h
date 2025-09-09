@@ -10,6 +10,7 @@ extern const size_t test_gif_size;
 
 // GIF测试函数
 void test_gif_display();
+void test_gif_from_url(const char* url);
 void stop_gif_display();
 
 #endif // GIF_TEST_H

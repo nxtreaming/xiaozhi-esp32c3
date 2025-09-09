@@ -11,6 +11,12 @@
 
 #include "board.h"
 #include <math.h>
+#include <esp_http_client.h>
+#include <esp_tls.h>
+#include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #define TAG "LcdDisplay"
 
 // Color definitions for dark theme
@@ -632,7 +638,7 @@ void setup_eye_animations(eye_t *eye, int eye_size) {
     set_random_pupil_movement(eye->pupil, eye_size);
 }
 
-#define  ENABLE_EYES_SIMULATION 1
+//#define  ENABLE_EYES_SIMULATION 1
 
 #ifdef ENABLE_EYES_SIMULATION
 
@@ -1100,12 +1106,12 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     uint32_t free_heap = esp_get_free_heap_size();
     ESP_LOGI(TAG, "Free heap before GIF creation: %lu bytes", free_heap);
 
-    // Estimate memory needed for GIF (ESP32-S3 with PSRAM can handle much larger GIFs)
-    uint32_t estimated_memory = 4 * 128 * 128; // Support up to 128x128 GIF (~64KB)
+    // Estimate memory needed for GIF (ESP32-S3 with PSRAM can handle large GIFs)
+    uint32_t estimated_memory = 4 * 360 * 360; // Support 360x360 GIF (~500KB)
 
     // With PSRAM, we have much more memory available
-    if (free_heap < estimated_memory + 50000) { // 50KB safety margin for PSRAM system
-        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 50KB safety, have %lu", estimated_memory, free_heap);
+    if (free_heap < estimated_memory + 100000) { // 100KB safety margin for large GIF
+        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 100KB safety, have %lu", estimated_memory, free_heap);
         // Fall through to placeholder creation
         goto create_placeholder;
     }
@@ -1117,10 +1123,8 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
         goto create_placeholder;
     }
 
-    // Add debug border to verify GIF object creation
-    lv_obj_set_style_border_width(gif_img_, 3, 0);
-    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x00FF00), 0);  // Green border
-    lv_obj_set_style_border_opa(gif_img_, LV_OPA_COVER, 0);
+    // 移除调试边框 - 用户要求去掉绿色边缘
+    lv_obj_set_style_border_width(gif_img_, 0, 0);
 
     // Create image descriptor for the GIF data
     lv_img_dsc_t img_dsc;
@@ -1141,9 +1145,9 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
 
     // Position the GIF - center for testing
     if (x == 0 && y == 0) {
-        // Center position for 4x4 GIF on 412x412 screen: (412-4)/2 = 204
-        lv_obj_set_pos(gif_img_, 204, 204);
-        ESP_LOGI(TAG, "GIF positioned at center (204, 204) for testing");
+        // Center position for 360x360 GIF on 412x412 screen: (412-360)/2 = 26
+        lv_obj_set_pos(gif_img_, 26, 26);
+        ESP_LOGI(TAG, "GIF positioned at center (26, 26) for testing");
     } else {
         lv_obj_set_pos(gif_img_, x, y);
         ESP_LOGI(TAG, "GIF positioned at custom location (%d, %d)", x, y);
@@ -1157,7 +1161,7 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     lv_obj_move_foreground(gif_img_);
 
     ESP_LOGI(TAG, "GIF animation created and started successfully");
-    ESP_LOGI(TAG, "GIF size: 4x4, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
+    ESP_LOGI(TAG, "GIF size: 360x360, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
     ESP_LOGI(TAG, "GIF parent: %p, screen: %p", lv_obj_get_parent(gif_img_), lv_screen_active());
     ESP_LOGI(TAG, "Free heap after GIF creation: %lu bytes", (unsigned long)esp_get_free_heap_size());
     return;
@@ -1207,4 +1211,199 @@ void LcdDisplay::HideGif() {
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
     }
+}
+
+// HTTP下载数据结构
+struct HttpDownloadData {
+    uint8_t* buffer;
+    size_t buffer_size;
+    size_t data_len;
+    size_t max_size;
+    bool success;
+};
+
+// HTTP事件处理回调
+static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    HttpDownloadData* download_data = (HttpDownloadData*)evt->user_data;
+
+    switch(evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
+            download_data->success = false;
+            break;
+
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
+            break;
+
+        case HTTP_EVENT_HEADER_SENT:
+            ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
+            break;
+
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            if (strcasecmp(evt->header_key, "Content-Length") == 0) {
+                size_t content_length = atoi(evt->header_value);
+                ESP_LOGI(TAG, "Content-Length: %zu bytes", content_length);
+
+                // 检查文件大小是否合理 (最大10MB)
+                if (content_length > 10 * 1024 * 1024) {
+                    ESP_LOGE(TAG, "GIF file too large: %zu bytes (max 10MB)", content_length);
+                    download_data->success = false;
+                    return ESP_FAIL;
+                }
+
+                // 重新分配缓冲区以适应实际大小
+                if (content_length > download_data->buffer_size) {
+                    uint8_t* new_buffer = (uint8_t*)heap_caps_realloc(download_data->buffer,
+                                                                     content_length,
+                                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (new_buffer == nullptr) {
+                        ESP_LOGE(TAG, "Failed to reallocate buffer for %zu bytes", content_length);
+                        download_data->success = false;
+                        return ESP_FAIL;
+                    }
+                    download_data->buffer = new_buffer;
+                    download_data->buffer_size = content_length;
+                    download_data->max_size = content_length;
+                }
+            }
+            break;
+
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            if (!esp_http_client_is_chunked_response(evt->client)) {
+                // 检查缓冲区空间
+                if (download_data->data_len + evt->data_len > download_data->max_size) {
+                    ESP_LOGE(TAG, "Download data exceeds buffer size");
+                    download_data->success = false;
+                    return ESP_FAIL;
+                }
+
+                // 复制数据到缓冲区
+                memcpy(download_data->buffer + download_data->data_len, evt->data, evt->data_len);
+                download_data->data_len += evt->data_len;
+
+                // 显示下载进度
+                if (download_data->max_size > 0) {
+                    int progress = (download_data->data_len * 100) / download_data->max_size;
+                    ESP_LOGI(TAG, "Download progress: %d%% (%zu/%zu bytes)",
+                            progress, download_data->data_len, download_data->max_size);
+                }
+            }
+            break;
+
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH, total downloaded: %zu bytes", download_data->data_len);
+            download_data->success = true;
+            break;
+
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            break;
+
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
+void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
+    if (url == nullptr || strlen(url) == 0) {
+        ESP_LOGE(TAG, "Invalid URL provided");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Starting GIF download from URL: %s", url);
+
+    // 检查可用内存
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "Available PSRAM: %zu bytes", free_heap);
+
+    if (free_heap < 1024 * 1024) { // 至少需要1MB空闲内存
+        ESP_LOGE(TAG, "Insufficient memory for GIF download: %zu bytes available", free_heap);
+        return;
+    }
+
+    // 初始化下载数据结构
+    HttpDownloadData download_data = {0};
+    download_data.buffer_size = 512 * 1024; // 初始512KB缓冲区
+    download_data.max_size = 10 * 1024 * 1024; // 最大10MB
+    download_data.data_len = 0;
+    download_data.success = false;
+
+    // 分配初始缓冲区 (优先使用PSRAM)
+    download_data.buffer = (uint8_t*)heap_caps_malloc(download_data.buffer_size,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (download_data.buffer == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate download buffer");
+        return;
+    }
+
+    // 配置HTTP客户端
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = http_event_handler,
+        .user_data = &download_data,
+        .timeout_ms = 30000, // 30秒超时
+        .buffer_size = 4096,
+        .buffer_size_tx = 1024,
+    };
+
+    // 如果是HTTPS，启用证书验证
+    if (strncmp(url, "https://", 8) == 0) {
+        config.use_global_ca_store = true;
+        config.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        heap_caps_free(download_data.buffer);
+        return;
+    }
+
+    // 执行HTTP GET请求
+    ESP_LOGI(TAG, "Starting HTTP GET request...");
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        int status_code = esp_http_client_get_status_code(client);
+        int content_length = esp_http_client_get_content_length(client);
+
+        ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d", status_code, content_length);
+
+        if (status_code == 200 && download_data.success && download_data.data_len > 0) {
+            ESP_LOGI(TAG, "GIF download successful: %zu bytes", download_data.data_len);
+
+            // 验证GIF文件头
+            if (download_data.data_len >= 6 &&
+                memcmp(download_data.buffer, "GIF87a", 6) == 0 ||
+                memcmp(download_data.buffer, "GIF89a", 6) == 0) {
+
+                ESP_LOGI(TAG, "Valid GIF file detected, displaying...");
+
+                // 调用现有的ShowGif函数显示GIF
+                ShowGif(download_data.buffer, download_data.data_len, x, y);
+
+            } else {
+                ESP_LOGE(TAG, "Downloaded file is not a valid GIF");
+            }
+        } else {
+            ESP_LOGE(TAG, "HTTP request failed: status=%d, success=%d, data_len=%zu",
+                    status_code, download_data.success, download_data.data_len);
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    }
+
+    // 清理资源
+    esp_http_client_cleanup(client);
+
+    // 注意：不要立即释放buffer，因为LVGL可能还在使用它
+    // 在实际应用中，应该在GIF显示完成后再释放
+    // 这里为了简化，我们暂时不释放，让系统自动回收
+    // heap_caps_free(download_data.buffer);
+
+    ESP_LOGI(TAG, "GIF download and display process completed");
 }

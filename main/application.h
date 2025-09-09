@@ -201,6 +201,7 @@ public:
 
     // GIF display methods
     void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
+    void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     void HideGif();
     bool IsGifPlaying() const;
 
