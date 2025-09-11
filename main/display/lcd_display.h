@@ -6,6 +6,8 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <font_emoji.h>
+#include <memory>
+#include "lvgl_display/gif/lvgl_gif.h"
 
 #include <atomic>
 
@@ -28,10 +30,8 @@ protected:
 
     DisplayFonts fonts_;
 
-    // GIF buffer management for dynamically allocated data
-    uint8_t* gif_buffer_ = nullptr;
-    size_t gif_buffer_size_ = 0;
-    bool gif_is_gif_ = false;              // Track if current obj is a real GIF
+    // GIF controller (official-style): decode + frame timer
+    std::unique_ptr<LvglGif> gif_controller_;
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;

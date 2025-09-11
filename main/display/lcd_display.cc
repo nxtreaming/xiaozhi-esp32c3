@@ -258,12 +258,6 @@ LcdDisplay::~LcdDisplay() {
         gif_img_ = nullptr;
     }
 
-    // 清理 GIF 缓冲区
-    if (gif_buffer_ != nullptr) {
-        heap_caps_free(gif_buffer_);
-        gif_buffer_ = nullptr;
-        gif_buffer_size_ = 0;
-    }
 
 
     // 然后再清理 LVGL 对象
@@ -1130,6 +1124,59 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     }
 
     ESP_LOGI(TAG, "GIF header validation passed: %.6s", gif_data);
+    ESP_LOGI(TAG, "SPIRAM before Show: %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+
+    // Official-style path: reuse controller if exists; otherwise create
+    {
+        if (gif_controller_ && gif_img_) {
+            // Unhide and restart controller on reuse
+            lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+            gif_controller_->Restart();
+            if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+            lv_obj_move_foreground(gif_img_);
+            ESP_LOGI(TAG, "GIF restarted on existing controller");
+            return;
+        }
+
+        // Build a descriptor that points to raw GIF bytes
+        lv_image_dsc_t src{};
+        src.header.magic = LV_IMAGE_HEADER_MAGIC;
+        src.header.cf = LV_COLOR_FORMAT_UNKNOWN;
+        src.data = gif_data;
+        src.data_size = gif_size;
+
+        gif_controller_ = std::make_unique<LvglGif>(&src);
+        if (!gif_controller_ || !gif_controller_->IsLoaded()) {
+            ESP_LOGE(TAG, "Failed to initialize GIF controller");
+            gif_controller_.reset();
+            return;
+        }
+        // Cap FPS by enforcing a minimum frame interval (e.g., 200 ms => <=5 FPS)
+        gif_controller_->SetMinFrameInterval(200);
+
+        if (!gif_img_) {
+            gif_img_ = lv_image_create(lv_screen_active());
+            if (!gif_img_) { gif_controller_.reset(); return; }
+            lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(gif_img_, 0, 0);
+        }
+
+    lv_image_set_src(gif_img_, gif_controller_->image_dsc());
+    gif_controller_->SetFrameCallback([this]() {
+        if (gif_img_) {
+            // Source descriptor pointer is stable; just invalidate to redraw
+            lv_obj_invalidate(gif_img_);
+        }
+    });
+        gif_controller_->Start();
+
+        if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+        lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(gif_img_);
+        ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
+        return;
+    }
 
 #if FORCE_GIF_PLACEHOLDER_TEST
     ESP_LOGW(TAG, "Forced GIF placeholder mode (testing memory, real GIF disabled)");
@@ -1156,7 +1203,6 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     lv_label_set_text(ph_label, "GIF\nOK");
     lv_obj_set_style_text_color(ph_label, lv_color_white(), 0);
     lv_obj_center(ph_label);
-    gif_is_gif_ = false;
     ESP_LOGI(TAG, "GIF placeholder created (forced test mode)");
     return;
 #endif
@@ -1295,8 +1341,6 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     ESP_LOGI(TAG, "SPIRAM after GIF creation: free=%u, largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    // Mark as a real GIF object
-    gif_is_gif_ = true;
     return;
 
 create_placeholder:
@@ -1336,30 +1380,33 @@ create_placeholder:
     lv_obj_center(label);
 
     ESP_LOGI(TAG, "GIF placeholder created (decoder temporarily disabled)");
-    // Placeholder is not a real GIF widget
-    gif_is_gif_ = false;
 }
 
 void LcdDisplay::HideGif() {
     DisplayLockGuard lock(this);
 
-    // Force destroy to guarantee releasing all memory between plays
-    DestroyGif();
+    // Pause + hide only; keep controller and lv_image to avoid re-alloc each cycle
+    // Pause controller while hidden to avoid CPU overload and watchdog
+    if (gif_controller_) {
+        gif_controller_->Pause();
+    }
+    if (gif_img_) {
+        lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+    }
+    ESP_LOGI(TAG, "SPIRAM after Hide (paused): %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 }
 
 void LcdDisplay::DestroyGif() {
     DisplayLockGuard lock(this);
-    if (gif_img_ != nullptr) {
-        lv_refr_now(display_);
-        lv_obj_del(gif_img_);
-        gif_img_ = nullptr;
-        gif_is_gif_ = false;
+    if (gif_controller_) {
+        gif_controller_->Stop();
+        gif_controller_.reset();
     }
-    if (gif_buffer_ != nullptr) {
-        ESP_LOGI(TAG, "Freeing GIF buffer: %zu bytes", gif_buffer_size_);
-        heap_caps_free(gif_buffer_);
-        gif_buffer_ = nullptr;
-        gif_buffer_size_ = 0;
+    if (gif_img_ != nullptr) {
+        // Detach source and hide, but keep the lv_image object to avoid re-allocating LVGL draw handlers
+        lv_image_set_src(gif_img_, NULL);
+        lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1387,29 +1434,44 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
     // Hide existing GIF if any - this will clean up any previous resources
     HideGif();
 
-    // Free previous managed download buffer if held; new source will be provided
-    if (gif_buffer_ != nullptr) {
-        ESP_LOGI(TAG, "Releasing previous managed GIF buffer before loading new one (%zu bytes)", gif_buffer_size_);
-        heap_caps_free(gif_buffer_);
-        gif_buffer_ = nullptr;
-        gif_buffer_size_ = 0;
-    }
 
     // Keep a local reference so ShowGif's internal HideGif can't free it
     uint8_t* temp_buffer = gif_data;
 
-    // Important: don't assign to gif_buffer_ yet. Let ShowGif run first.
+    // Controller path: keep buffer alive after ShowGif by storing in controller
     ShowGif(temp_buffer, gif_size, x, y);
 
     // If ShowGif created a real GIF widget, transfer ownership; otherwise free
-    if (gif_is_gif_) {
-        gif_buffer_ = temp_buffer;
-        gif_buffer_size_ = gif_size;
-        ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
-    } else {
-        ESP_LOGW(TAG, "GIF decode failed or placeholder shown; freeing download buffer");
+    // For controller path we must keep the buffer alive while playing
+    // Store it in a static lv_image_dsc_t and rebuild controller with this buffer
+    DestroyGif();
+    lv_image_dsc_t src{};
+    src.header.magic = LV_IMAGE_HEADER_MAGIC;
+    src.header.cf = LV_COLOR_FORMAT_UNKNOWN;
+    src.data = temp_buffer;
+    src.data_size = gif_size;
+    gif_controller_ = std::make_unique<LvglGif>(&src);
+    if (!gif_controller_ || !gif_controller_->IsLoaded()) {
+        ESP_LOGW(TAG, "GIF decode failed; freeing download buffer");
         heap_caps_free(temp_buffer);
+        gif_controller_.reset();
+        return;
     }
+    if (!gif_img_) {
+        gif_img_ = lv_image_create(lv_screen_active());
+        if (!gif_img_) { gif_controller_.reset(); heap_caps_free(temp_buffer); return; }
+        lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(gif_img_, 0, 0);
+    }
+    lv_image_set_src(gif_img_, gif_controller_->image_dsc());
+    gif_controller_->SetFrameCallback([this]() {
+        if (gif_img_) { lv_image_set_src(gif_img_, gif_controller_->image_dsc()); lv_obj_invalidate(gif_img_); }
+    });
+    gif_controller_->Start();
+    if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+    lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(gif_img_);
+    ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
 }
 
 // HTTP下载数据结构
