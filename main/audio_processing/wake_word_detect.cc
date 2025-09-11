@@ -130,7 +130,8 @@ void WakeWordDetect::AudioDetectionTask() {
 }
 
 void WakeWordDetect::StoreWakeWordData(uint16_t* data, size_t samples) {
-    // store audio data to wake_word_pcm_
+    // store audio data to wake_word_pcm_ (thread-safe)
+    std::lock_guard<std::mutex> lock(wake_word_pcm_mutex_);
     wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
     // keep about 2 seconds of data, detect duration is 32ms (sample_rate == 16000, chunksize == 512)
     while (wake_word_pcm_.size() > 2000 / 32) {
@@ -150,14 +151,20 @@ void WakeWordDetect::EncodeWakeWordData() {
             auto encoder = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
             encoder->SetComplexity(0); // 0 is the fastest
 
-            for (auto& pcm: this_->wake_word_pcm_) {
+            // Move PCM data out under lock to avoid concurrent modification
+            std::list<std::vector<int16_t>> local_pcm;
+            {
+                std::lock_guard<std::mutex> lock(this_->wake_word_pcm_mutex_);
+                local_pcm.swap(this_->wake_word_pcm_);
+            }
+
+            for (auto& pcm: local_pcm) {
                 encoder->Encode(std::move(pcm), [this_](std::vector<uint8_t>&& opus) {
                     std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
                     this_->wake_word_opus_.emplace_back(std::move(opus));
                     this_->wake_word_cv_.notify_all();
                 });
             }
-            this_->wake_word_pcm_.clear();
 
             auto end_time = esp_timer_get_time();
             ESP_LOGI(TAG, "Encode wake word opus %zu packets in %lld ms",
