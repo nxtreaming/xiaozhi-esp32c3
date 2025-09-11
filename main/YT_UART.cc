@@ -42,7 +42,6 @@ extern "C" void uart_yt_init(void)
 void uart_receive_task_YT(void *pvParameters)   
 {
     uint8_t *data = (uint8_t *)malloc(1024);
-    uint32_t check = 0;
     if (data == NULL) {
         ESP_LOGE(TAG, "Failed to allocate UART buffer!");
         vTaskDelete(NULL);
@@ -194,6 +193,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x20;
                     Yt_cmd[4] = 0x21;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100));
                     ESP_LOGI(TAG, "1111111111111111111111111 ");
                     cmd_sent = true;  // 标记为已发送
@@ -269,6 +269,7 @@ void yt_command_handler_task(void *pvParameters)
                 Yt_cmd[3] = 0x22;
                 Yt_cmd[4] = 0x23;
                 int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                (void)len;
                 uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 gpio_set_level(GPIO_NUM_11, 1); 
@@ -296,6 +297,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x23;
                     Yt_cmd[4] = 0x24;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
 
                     vTaskDelay(pdMS_TO_TICKS(2200));
                     gpio_set_level(GPIO_NUM_11, 1); 
@@ -322,6 +324,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x20;
                     Yt_cmd[4] = 0x21;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5); 
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     yt_command_flag = 0;  // 清除标志
                 }
@@ -342,6 +345,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x21;
                     Yt_cmd[4] = 0x22;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     yt_command_flag = 0;  // 清除标志
                 }
                 else
@@ -394,6 +398,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x24;
                     Yt_cmd[4] = 0x25;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("增大音量");
                     yt_command_flag = 0;  // 清除标志
@@ -415,6 +420,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x25;
                     Yt_cmd[4] = 0x26;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("减少音量");
                     yt_command_flag = 0;  // 清除标志
@@ -436,6 +442,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x1E;
                     Yt_cmd[4] = 0x1F;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("上一首");
                     yt_command_flag = 0;  // 清除标志
@@ -457,6 +464,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x1F;
                     Yt_cmd[4] = 0x20;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("下一首");
                     yt_command_flag = 0;  // 清除标志
@@ -478,6 +486,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x26;
                     Yt_cmd[4] = 0x27;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("最大音量");
                     yt_command_flag = 0;  // 清除标志
@@ -499,6 +508,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x27;
                     Yt_cmd[4] = 0x28;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
                     display->SetStatus("最小音量");
                     //5.6加
@@ -525,6 +535,7 @@ void yt_command_handler_task(void *pvParameters)
                     Yt_cmd[3] = 0x01;
                     Yt_cmd[4] = 0x03;
                     int len = uart_write_bytes(UART_YT_PORT, Yt_cmd, 5);
+                    (void)len;
                     uart_wait_tx_done(UART_YT_PORT, pdMS_TO_TICKS(100)); // 等待最多100ms
 
                     vTaskDelay(pdMS_TO_TICKS(1000));

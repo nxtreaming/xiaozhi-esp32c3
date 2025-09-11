@@ -41,7 +41,6 @@ extern "C" void uart_init_PFS123(void)
 void uart_receive_task_PFS123(void *pvParameters)
 {
     uint8_t *data = (uint8_t *)malloc(256);
-    uint32_t check = 0;
     while (1)
     {
         int len = uart_read_bytes(UART_PORT_PFS123, data, 256, 20 / portTICK_PERIOD_MS);
