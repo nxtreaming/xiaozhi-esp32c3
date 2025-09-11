@@ -17,7 +17,16 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <string.h>
+#include <lvgl.h>
 #define TAG "LcdDisplay"
+
+// Test switch: force showing placeholder instead of decoding real GIFs
+// Set to 1 to always use placeholder (for memory behavior isolation)
+// Set to 0 to enable real GIF decoding
+#ifndef FORCE_GIF_PLACEHOLDER_TEST
+#define FORCE_GIF_PLACEHOLDER_TEST 0
+#endif
 
 // Color definitions for dark theme
 #define DARK_BACKGROUND_COLOR       lv_color_hex(0x121212)     // Dark background
@@ -109,6 +118,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority = 1;
+    // Use safe default LVGL task stack to avoid stack overflow on first refresh
+    port_cfg.task_stack = 6144;
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD screen");
@@ -116,7 +127,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 10),
+        // Reduce draw buffer to lower internal RAM usage
+        // Further reduce draw buffer to ease internal RAM pressure
+        .buffer_size = static_cast<uint32_t>(width_ * 2),
         .double_buffer = false,
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
@@ -130,7 +143,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags = {
             .buff_dma = 1,
-            .buff_spiram = 0,
+            // Place LVGL draw buffer in PSRAM when available
+            .buff_spiram = 1,
             .sw_rotate = 0,
             .swap_bytes = 1,
             .full_refresh = 0,
@@ -185,8 +199,11 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
-        .buffer_size = static_cast<uint32_t>(width_ * 10),
-        .double_buffer = true,
+        // Reduce draw buffer to lower internal RAM usage
+        // Further reduce draw buffer to ease internal RAM pressure
+        .buffer_size = static_cast<uint32_t>(width_ * 2),
+        // Disable double buffering to save memory on tight systems
+        .double_buffer = false,
         .hres = static_cast<uint32_t>(width_),
         .vres = static_cast<uint32_t>(height_),
         .rotation = {
@@ -196,7 +213,10 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         },
         .flags = {
             .buff_dma = 1,
+            // Place LVGL draw buffer in PSRAM when available
+            .buff_spiram = 1,
             .swap_bytes = 0,
+            // Re-enable full_refresh/direct_mode to reduce intermediate copies
             .full_refresh = 1,
             .direct_mode = 1,
         },
@@ -204,8 +224,10 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
 
     const lvgl_port_display_rgb_cfg_t rgb_cfg = {
         .flags = {
-            .bb_mode = true,
-            .avoid_tearing = true,
+            // Disable big buffer mode to reduce internal RAM footprint
+            .bb_mode = false,
+            // Disable tearing avoidance to save additional internal buffers
+            .avoid_tearing = false,
         }
     };
     
@@ -243,11 +265,6 @@ LcdDisplay::~LcdDisplay() {
         gif_buffer_size_ = 0;
     }
 
-    // 清理 GIF 图像描述符
-    if (gif_img_dsc_ != nullptr) {
-        delete gif_img_dsc_;
-        gif_img_dsc_ = nullptr;
-    }
 
     // 然后再清理 LVGL 对象
     if (content_ != nullptr) {
@@ -1107,16 +1124,57 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     }
 
     // Validate GIF header
-    if (gif_size < 6 || memcmp(gif_data, "GIF", 3) != 0) {
+    if (gif_size < 10 || memcmp(gif_data, "GIF", 3) != 0) {
         ESP_LOGE(TAG, "Invalid GIF header, size=%lu", (unsigned long)gif_size);
         return;
     }
 
     ESP_LOGI(TAG, "GIF header validation passed: %.6s", gif_data);
 
+#if FORCE_GIF_PLACEHOLDER_TEST
+    ESP_LOGW(TAG, "Forced GIF placeholder mode (testing memory, real GIF disabled)");
+    // Create a tiny placeholder instead of a real GIF to isolate memory effects
+    gif_img_ = lv_obj_create(lv_screen_active());
+    if (gif_img_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create fallback placeholder");
+        return;
+    }
+    lv_obj_set_size(gif_img_, 16, 16);
+    lv_obj_set_style_bg_color(gif_img_, lv_color_hex(0xFF6B6B), 0);
+    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(gif_img_, 0, 0);
+    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(gif_img_, 0, 0);
+    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(gif_img_, 8, 0);
+    if (x == 0 && y == 0) {
+        lv_obj_set_pos(gif_img_, 174, 174);
+    } else {
+        lv_obj_set_pos(gif_img_, x, y);
+    }
+    lv_obj_t* ph_label = lv_label_create(gif_img_);
+    lv_label_set_text(ph_label, "GIF\nOK");
+    lv_obj_set_style_text_color(ph_label, lv_color_white(), 0);
+    lv_obj_center(ph_label);
+    gif_is_gif_ = false;
+    ESP_LOGI(TAG, "GIF placeholder created (forced test mode)");
+    return;
+#endif
+
     // Log memory before operations
     uint32_t free_heap_before = esp_get_free_heap_size();
     ESP_LOGI(TAG, "Free heap before GIF operations: %lu bytes", free_heap_before);
+
+    // Parse GIF logical screen size (little-endian) at bytes 6..9
+    uint16_t gif_w = gif_data[6] | (uint16_t(gif_data[7]) << 8);
+    uint16_t gif_h = gif_data[8] | (uint16_t(gif_data[9]) << 8);
+    if (gif_w == 0 || gif_h == 0) {
+        ESP_LOGW(TAG, "GIF logical size invalid, fallback to 360x360 estimate");
+        gif_w = 360; gif_h = 360;
+    }
+    // LVGL GIF uses ARGB8888 canvas + frame buffer: ~5 bytes per pixel
+    size_t est_gif_bytes = (size_t)gif_w * (size_t)gif_h * 5;
+    ESP_LOGI(TAG, "Estimated GIF RAM need: %ux%u -> ~%u bytes", gif_w, gif_h, (unsigned)est_gif_bytes);
 
     // Hide existing GIF if any - this will properly clean up resources
     HideGif();
@@ -1126,19 +1184,43 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     // as long as the caller ensures the data remains valid during display
     const uint8_t* gif_data_to_use = gif_data;
 
+    // Proceed with LVGL GIF widget (no direct panel drawing)
+
 #if LV_USE_GIF
+    // Let LVGL process pending frees before allocating
+    lv_timer_handler();
     // Check available memory before creating GIF
     uint32_t free_heap = esp_get_free_heap_size();
     ESP_LOGI(TAG, "Free heap before GIF creation: %lu bytes", free_heap);
+    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t spiram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "Internal heap before GIF: free=%u, largest=%u", (unsigned)internal_free, (unsigned)internal_largest);
+    ESP_LOGI(TAG, "SPIRAM before GIF: free=%u, largest=%u", (unsigned)spiram_free, (unsigned)spiram_largest);
 
-    // Estimate memory needed for GIF (ESP32-S3 with PSRAM can handle large GIFs)
-    uint32_t estimated_memory = 4 * 360 * 360; // Support 360x360 GIF (~500KB)
+    // Estimate memory needed for GIF (ESP32 with PSRAM can handle large GIFs)
+    uint32_t estimated_memory = 4 * 360 * 360; // ~500KB for 360x360 RGBA canvas
 
-    // With PSRAM, we have much more memory available
-    if (free_heap < estimated_memory + 100000) { // 100KB safety margin for large GIF
-        ESP_LOGW(TAG, "Insufficient memory for GIF: need ~%lu + 100KB safety, have %lu", estimated_memory, free_heap);
-        // Fall through to placeholder creation
+    // Keep generous PSRAM headroom and only WARN on low internal RAM.
+    // With CONFIG_SPIRAM_USE_MALLOC + LV_USE_CLIB_MALLOC, large blocks come from PSRAM.
+    const uint32_t kWarnInternalFree = 20 * 1024;    // warn if below 20KB
+    const uint32_t kWarnInternalLargest = 16 * 1024; // warn if largest < 16KB
+    const size_t kSpiramHeadroom = 200 * 1024;       // keep 200KB PSRAM free
+
+    bool spiram_ok = (spiram_largest >= est_gif_bytes) && (spiram_free >= est_gif_bytes + kSpiramHeadroom);
+    bool heap_ok = (free_heap >= estimated_memory + 100000);
+
+    if (!heap_ok || !spiram_ok) {
+        ESP_LOGW(TAG, "Insufficient memory for GIF in PSRAM path: need ~%lu + 100KB safety, have %lu", estimated_memory, free_heap);
+        ESP_LOGW(TAG, "SPIRAM status: need est=%u, free=%u, largest=%u, headroom>=%u",
+                 (unsigned)est_gif_bytes, (unsigned)spiram_free, (unsigned)spiram_largest, (unsigned)kSpiramHeadroom);
         goto create_placeholder;
+    }
+
+    if (internal_free < kWarnInternalFree || internal_largest < kWarnInternalLargest) {
+        ESP_LOGW(TAG, "Internal RAM is low (free=%u, largest=%u) but proceeding to try LVGL GIF",
+                 (unsigned)internal_free, (unsigned)internal_largest);
     }
 
     // Try to create a GIF object using LVGL's GIF decoder
@@ -1165,26 +1247,22 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     lv_obj_set_style_outline_color(gif_img_, lv_color_hex(0x000000), 0);
 
     // 额外确保：清除所有可能的样式继承
-    lv_obj_remove_style_all(gif_img_);
+    // lv_obj_remove_style_all(gif_img_); // removed to avoid stripping internal styles
     // 重新应用无边框样式
     lv_obj_set_style_border_width(gif_img_, 0, 0);
     lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
 
-    // Create persistent image descriptor for the GIF data
-    // This needs to remain valid for the entire lifetime of the GIF
-    gif_img_dsc_ = new lv_img_dsc_t;
-    gif_img_dsc_->header.magic = LV_IMAGE_HEADER_MAGIC;
-    gif_img_dsc_->header.cf = LV_COLOR_FORMAT_UNKNOWN; // Let LVGL auto-detect format
-    gif_img_dsc_->header.flags = 0;
-    gif_img_dsc_->header.w = 0; // Will be determined by decoder
-    gif_img_dsc_->header.h = 0; // Will be determined by decoder
-    gif_img_dsc_->header.stride = 0; // Will be determined by decoder
-    gif_img_dsc_->data = gif_data_to_use;
-    gif_img_dsc_->data_size = gif_size;
+    // Build a temporary image descriptor to pass raw GIF bytes
+    lv_image_dsc_t local_dsc;
+    memset(&local_dsc, 0, sizeof(local_dsc));
+    local_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    local_dsc.header.cf = LV_COLOR_FORMAT_UNKNOWN; // auto-detect
+    local_dsc.data = gif_data_to_use;
+    local_dsc.data_size = gif_size;
 
     // Set the GIF source with error handling
     ESP_LOGI(TAG, "Setting GIF source...");
-    lv_gif_set_src(gif_img_, gif_img_dsc_);
+    lv_gif_set_src(gif_img_, &local_dsc);
 
     // Note: LVGL doesn't provide lv_gif_get_src, so we assume success if no crash occurs
 
@@ -1209,6 +1287,14 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     ESP_LOGI(TAG, "GIF size: 360x360, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
     ESP_LOGI(TAG, "GIF parent: %p, screen: %p", lv_obj_get_parent(gif_img_), lv_screen_active());
     ESP_LOGI(TAG, "Free heap after GIF creation: %lu bytes", (unsigned long)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "Internal heap after GIF creation: free=%u, largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGI(TAG, "SPIRAM after GIF creation: free=%u, largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    // Mark as a real GIF object
+    gif_is_gif_ = true;
     return;
 
 create_placeholder:
@@ -1248,10 +1334,14 @@ create_placeholder:
     lv_obj_center(label);
 
     ESP_LOGI(TAG, "GIF placeholder created (decoder temporarily disabled)");
+    // Placeholder is not a real GIF widget
+    gif_is_gif_ = false;
 }
 
 void LcdDisplay::HideGif() {
     DisplayLockGuard lock(this);
+
+    // No direct GIF player to stop anymore
 
     if (gif_img_ != nullptr) {
         ESP_LOGI(TAG, "Hiding GIF animation");
@@ -1259,9 +1349,10 @@ void LcdDisplay::HideGif() {
         // Force LVGL to process any pending operations before deletion
         lv_refr_now(display_);
 
-        // Delete the GIF object - this should free all associated resources
+        // Delete the object - this will run lv_gif's destructor and free decoder internals
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
+        gif_is_gif_ = false;
 
         // Clean up any dynamically allocated GIF buffer
         if (gif_buffer_ != nullptr) {
@@ -1271,17 +1362,19 @@ void LcdDisplay::HideGif() {
             gif_buffer_size_ = 0;
         }
 
-        // Clean up GIF image descriptor
-        if (gif_img_dsc_ != nullptr) {
-            delete gif_img_dsc_;
-            gif_img_dsc_ = nullptr;
-        }
+        // No external image descriptor is kept; lv_gif manages its own internal descriptor
 
         // Force garbage collection to ensure memory is freed
         lv_mem_monitor_t mon;
         lv_mem_monitor(&mon);
         ESP_LOGI(TAG, "Memory after GIF cleanup - used: %d%%, frag: %d%%",
                  mon.used_pct, mon.frag_pct);
+        ESP_LOGI(TAG, "Internal heap after GIF cleanup: free=%u, largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        ESP_LOGI(TAG, "SPIRAM after GIF cleanup: free=%u, largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     }
 }
 
@@ -1306,24 +1399,24 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
         return;
     }
 
-    // Hide existing GIF if any - this will clean up any previous buffer
+    // Hide existing GIF if any - this will clean up any previous resources
     HideGif();
 
-    // Store the buffer for lifecycle management
-    gif_buffer_ = gif_data;
-    gif_buffer_size_ = gif_size;
+    // Keep a local reference so ShowGif's internal HideGif can't free it
+    uint8_t* temp_buffer = gif_data;
 
-    // Now call the regular ShowGif method with the managed data
-    // We temporarily set gif_buffer_ to nullptr to prevent double cleanup
-    uint8_t* temp_buffer = gif_buffer_;
-    gif_buffer_ = nullptr;
-
+    // Important: don't assign to gif_buffer_ yet. Let ShowGif run first.
     ShowGif(temp_buffer, gif_size, x, y);
 
-    // Restore the buffer pointer for proper cleanup later
-    gif_buffer_ = temp_buffer;
-
-    ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
+    // If ShowGif created a real GIF widget, transfer ownership; otherwise free
+    if (gif_is_gif_) {
+        gif_buffer_ = temp_buffer;
+        gif_buffer_size_ = gif_size;
+        ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
+    } else {
+        ESP_LOGW(TAG, "GIF decode failed or placeholder shown; freeing download buffer");
+        heap_caps_free(temp_buffer);
+    }
 }
 
 // HTTP下载数据结构

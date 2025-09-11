@@ -54,7 +54,7 @@ private:
             .bits_per_pixel = 16,
             .num_fbs = GC9503V_LCD_RGB_BUFFER_NUMS,
             .bounce_buffer_size_px = GC9503V_LCD_H_RES * GC9503V_LCD_RGB_BOUNCE_BUFFER_HEIGHT,
-            .dma_burst_size = 64,
+            .dma_burst_size = 32,
             .hsync_gpio_num = GC9503V_PIN_NUM_HSYNC,
             .vsync_gpio_num = GC9503V_PIN_NUM_VSYNC,
             .de_gpio_num = GC9503V_PIN_NUM_DE,

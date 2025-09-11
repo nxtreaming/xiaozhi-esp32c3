@@ -31,7 +31,7 @@ protected:
     // GIF buffer management for dynamically allocated data
     uint8_t* gif_buffer_ = nullptr;
     size_t gif_buffer_size_ = 0;
-    lv_img_dsc_t* gif_img_dsc_ = nullptr;  // Persistent image descriptor
+    bool gif_is_gif_ = false;              // Track if current obj is a real GIF
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -62,6 +62,7 @@ public:
     virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0) override;
     void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void HideGif() override;
+    virtual bool IsGifPlaying() const override { return gif_img_ != nullptr && gif_is_gif_; }
 
 private:
     // Internal method for showing GIF with managed buffer
