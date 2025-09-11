@@ -1176,8 +1176,8 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     size_t est_gif_bytes = (size_t)gif_w * (size_t)gif_h * 5;
     ESP_LOGI(TAG, "Estimated GIF RAM need: %ux%u -> ~%u bytes", gif_w, gif_h, (unsigned)est_gif_bytes);
 
-    // Hide existing GIF if any - this will properly clean up resources
-    HideGif();
+    // Always start from a clean state to avoid any leftover allocations
+    DestroyGif();
 
     // For this implementation, we'll use the data directly without copying
     // This works for both static data (embedded arrays) and dynamic data
@@ -1223,7 +1223,9 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
                  (unsigned)internal_free, (unsigned)internal_largest);
     }
 
-    // Try to create a GIF object using LVGL's GIF decoder
+    // Re-create the GIF object for a clean playback
+
+    // Try to create a GIF object using LVGL's GIF decoder (first time)
     gif_img_ = lv_gif_create(lv_screen_active());
     if (gif_img_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create GIF object");
@@ -1341,40 +1343,23 @@ create_placeholder:
 void LcdDisplay::HideGif() {
     DisplayLockGuard lock(this);
 
-    // No direct GIF player to stop anymore
+    // Force destroy to guarantee releasing all memory between plays
+    DestroyGif();
+}
 
+void LcdDisplay::DestroyGif() {
+    DisplayLockGuard lock(this);
     if (gif_img_ != nullptr) {
-        ESP_LOGI(TAG, "Hiding GIF animation");
-
-        // Force LVGL to process any pending operations before deletion
         lv_refr_now(display_);
-
-        // Delete the object - this will run lv_gif's destructor and free decoder internals
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
         gif_is_gif_ = false;
-
-        // Clean up any dynamically allocated GIF buffer
-        if (gif_buffer_ != nullptr) {
-            ESP_LOGI(TAG, "Freeing GIF buffer: %zu bytes", gif_buffer_size_);
-            heap_caps_free(gif_buffer_);
-            gif_buffer_ = nullptr;
-            gif_buffer_size_ = 0;
-        }
-
-        // No external image descriptor is kept; lv_gif manages its own internal descriptor
-
-        // Force garbage collection to ensure memory is freed
-        lv_mem_monitor_t mon;
-        lv_mem_monitor(&mon);
-        ESP_LOGI(TAG, "Memory after GIF cleanup - used: %d%%, frag: %d%%",
-                 mon.used_pct, mon.frag_pct);
-        ESP_LOGI(TAG, "Internal heap after GIF cleanup: free=%u, largest=%u",
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        ESP_LOGI(TAG, "SPIRAM after GIF cleanup: free=%u, largest=%u",
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (gif_buffer_ != nullptr) {
+        ESP_LOGI(TAG, "Freeing GIF buffer: %zu bytes", gif_buffer_size_);
+        heap_caps_free(gif_buffer_);
+        gif_buffer_ = nullptr;
+        gif_buffer_size_ = 0;
     }
 }
 
@@ -1401,6 +1386,14 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
 
     // Hide existing GIF if any - this will clean up any previous resources
     HideGif();
+
+    // Free previous managed download buffer if held; new source will be provided
+    if (gif_buffer_ != nullptr) {
+        ESP_LOGI(TAG, "Releasing previous managed GIF buffer before loading new one (%zu bytes)", gif_buffer_size_);
+        heap_caps_free(gif_buffer_);
+        gif_buffer_ = nullptr;
+        gif_buffer_size_ = 0;
+    }
 
     // Keep a local reference so ShowGif's internal HideGif can't free it
     uint8_t* temp_buffer = gif_data;

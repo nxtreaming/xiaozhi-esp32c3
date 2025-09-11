@@ -1,0 +1,2692 @@
+commit 57c2c640477f76fe942ff8abc403f5679760fb84
+Author: Xiaoxia <terrence@tenclass.com>
+Date:   Thu Sep 11 03:53:12 2025 +0800
+
+    feat: Add gif support (#1183)
+    
+    * feat: Add gif support
+    
+    * fix: compiling errors
+    
+    * fix remove bg image
+
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index f0bfa95..90471d1 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -55,6 +55,8 @@ set(SOURCES "audio/audio_codec.cc"
+             "display/lvgl_display/lvgl_theme.cc"
+             "display/lvgl_display/lvgl_font.cc"
+             "display/lvgl_display/lvgl_image.cc"
++            "display/lvgl_display/gif/lvgl_gif.cc"
++            "display/lvgl_display/gif/gifdec.c"
+             "protocols/protocol.cc"
+             "protocols/mqtt_protocol.cc"
+             "protocols/websocket_protocol.cc"
+diff --git a/main/assets.cc b/main/assets.cc
+index c7cc815..ee30212 100644
+--- a/main/assets.cc
++++ b/main/assets.cc
+@@ -106,17 +106,6 @@ bool Assets::InitializePartition() {
+     return checksum_valid_;
+ }
+ 
+-lv_color_t Assets::ParseColor(const std::string& color) {
+-    if (color.find("#") == 0) {
+-        // Convert #112233 to lv_color_t
+-        uint8_t r = strtol(color.substr(1, 2).c_str(), nullptr, 16);
+-        uint8_t g = strtol(color.substr(3, 2).c_str(), nullptr, 16);
+-        uint8_t b = strtol(color.substr(5, 2).c_str(), nullptr, 16);
+-        return lv_color_make(r, g, b);
+-    }
+-    return lv_color_black();
+-}
+-
+ bool Assets::Apply() {
+     void* ptr = nullptr;
+     size_t size = 0;
+@@ -158,6 +147,7 @@ bool Assets::Apply() {
+         }
+     }
+ 
++#ifdef HAVE_LVGL
+     auto& theme_manager = LvglThemeManager::GetInstance();
+     auto light_theme = theme_manager.GetTheme("light");
+     auto dark_theme = theme_manager.GetTheme("dark");
+@@ -180,7 +170,7 @@ bool Assets::Apply() {
+ 
+     cJSON* emoji_collection = cJSON_GetObjectItem(root, "emoji_collection");
+     if (cJSON_IsArray(emoji_collection)) {
+-        auto custom_emoji_collection = std::make_shared<CustomEmojiCollection>();
++        auto custom_emoji_collection = std::make_shared<EmojiCollection>();
+         int emoji_count = cJSON_GetArraySize(emoji_collection);
+         for (int i = 0; i < emoji_count; i++) {
+             cJSON* emoji = cJSON_GetArrayItem(emoji_collection, i);
+@@ -208,11 +198,11 @@ bool Assets::Apply() {
+             cJSON* background_color = cJSON_GetObjectItem(light_skin, "background_color");
+             cJSON* background_image = cJSON_GetObjectItem(light_skin, "background_image");
+             if (cJSON_IsString(text_color)) {
+-                light_theme->set_text_color(ParseColor(text_color->valuestring));
++                light_theme->set_text_color(LvglTheme::ParseColor(text_color->valuestring));
+             }
+             if (cJSON_IsString(background_color)) {
+-                light_theme->set_background_color(ParseColor(background_color->valuestring));
+-                light_theme->set_chat_background_color(ParseColor(background_color->valuestring));
++                light_theme->set_background_color(LvglTheme::ParseColor(background_color->valuestring));
++                light_theme->set_chat_background_color(LvglTheme::ParseColor(background_color->valuestring));
+             }
+             if (cJSON_IsString(background_image)) {
+                 if (!GetAssetData(background_image->valuestring, ptr, size)) {
+@@ -229,11 +219,11 @@ bool Assets::Apply() {
+             cJSON* background_color = cJSON_GetObjectItem(dark_skin, "background_color");
+             cJSON* background_image = cJSON_GetObjectItem(dark_skin, "background_image");
+             if (cJSON_IsString(text_color)) {
+-                dark_theme->set_text_color(ParseColor(text_color->valuestring));
++                dark_theme->set_text_color(LvglTheme::ParseColor(text_color->valuestring));
+             }
+             if (cJSON_IsString(background_color)) {
+-                dark_theme->set_background_color(ParseColor(background_color->valuestring));
+-                dark_theme->set_chat_background_color(ParseColor(background_color->valuestring));
++                dark_theme->set_background_color(LvglTheme::ParseColor(background_color->valuestring));
++                dark_theme->set_chat_background_color(LvglTheme::ParseColor(background_color->valuestring));
+             }
+             if (cJSON_IsString(background_image)) {
+                 if (!GetAssetData(background_image->valuestring, ptr, size)) {
+@@ -245,7 +235,8 @@ bool Assets::Apply() {
+             }
+         }
+     }
+-    
++#endif
++
+     auto display = Board::GetInstance().GetDisplay();
+     ESP_LOGI(TAG, "Refreshing display theme...");
+     display->SetTheme(display->GetTheme());
+diff --git a/main/assets.h b/main/assets.h
+index a9781f0..ff9a59e 100644
+--- a/main/assets.h
++++ b/main/assets.h
+@@ -1,15 +1,12 @@
+ #ifndef ASSETS_H
+ #define ASSETS_H
+ 
+-#include "emoji_collection.h"
+-
+ #include <map>
+ #include <string>
+ #include <functional>
+ 
+ #include <cJSON.h>
+ #include <esp_partition.h>
+-#include <lvgl.h>
+ #include <model_path.h>
+ 
+ 
+@@ -54,7 +51,6 @@ private:
+     bool InitializePartition();
+     uint32_t CalculateChecksum(const char* data, uint32_t length);
+     bool GetAssetData(const std::string& name, void*& ptr, size_t& size);
+-    lv_color_t ParseColor(const std::string& color);
+ 
+     const esp_partition_t* partition_ = nullptr;
+     esp_partition_mmap_handle_t mmap_handle_ = 0;
+diff --git a/main/boards/common/esp32_camera.cc b/main/boards/common/esp32_camera.cc
+index c274b16..d49c1e0 100644
+--- a/main/boards/common/esp32_camera.cc
++++ b/main/boards/common/esp32_camera.cc
+@@ -3,6 +3,7 @@
+ #include "display.h"
+ #include "board.h"
+ #include "system_info.h"
++#include "lvgl_display.h"
+ 
+ #include <esp_log.h>
+ #include <esp_heap_caps.h>
+@@ -60,7 +61,7 @@ bool Esp32Camera::Capture() {
+     ESP_LOGI(TAG, "Camera captured %d frames in %d ms", frames_to_get, int((end_time - start_time) / 1000));
+ 
+     // 显示预览图片
+-    auto display = Board::GetInstance().GetDisplay();
++    auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+     if (display != nullptr) {
+         // Create a new preview image
+         auto img_dsc = (lv_img_dsc_t*)heap_caps_calloc(1, sizeof(lv_img_dsc_t), MALLOC_CAP_8BIT);
+diff --git a/main/boards/electron-bot/electron_emoji_display.cc b/main/boards/electron-bot/electron_emoji_display.cc
+index 01032d0..01b16f6 100644
+--- a/main/boards/electron-bot/electron_emoji_display.cc
++++ b/main/boards/electron-bot/electron_emoji_display.cc
+@@ -60,8 +60,8 @@ ElectronEmojiDisplay::ElectronEmojiDisplay(esp_lcd_panel_io_handle_t panel_io,
+ void ElectronEmojiDisplay::SetupGifContainer() {
+     DisplayLockGuard lock(this);
+ 
+-    if (emotion_label_) {
+-        lv_obj_del(emotion_label_);
++    if (emoji_label_) {
++        lv_obj_del(emoji_label_);
+     }
+     if (chat_message_label_) {
+         lv_obj_del(chat_message_label_);
+@@ -78,11 +78,11 @@ void ElectronEmojiDisplay::SetupGifContainer() {
+     lv_obj_set_flex_grow(content_, 1);
+     lv_obj_center(content_);
+ 
+-    emotion_label_ = lv_label_create(content_);
+-    lv_label_set_text(emotion_label_, "");
+-    lv_obj_set_width(emotion_label_, 0);
+-    lv_obj_set_style_border_width(emotion_label_, 0, 0);
+-    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++    emoji_label_ = lv_label_create(content_);
++    lv_label_set_text(emoji_label_, "");
++    lv_obj_set_width(emoji_label_, 0);
++    lv_obj_set_style_border_width(emoji_label_, 0, 0);
++    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+ 
+     emotion_gif_ = lv_gif_create(content_);
+     int gif_size = LV_HOR_RES;
+diff --git a/main/boards/magiclick-2p4/magiclick_2p4_board.cc b/main/boards/magiclick-2p4/magiclick_2p4_board.cc
+index d9707d6..770884b 100644
+--- a/main/boards/magiclick-2p4/magiclick_2p4_board.cc
++++ b/main/boards/magiclick-2p4/magiclick_2p4_board.cc
+@@ -44,7 +44,7 @@ public:
+         // 设置内容区背景色和文本颜色
+         lv_obj_set_style_bg_color(content_, lv_color_black(), 0);
+         lv_obj_set_style_border_width(content_, 0, 0);
+-        lv_obj_set_style_text_color(emotion_label_, lv_color_white(), 0);
++        lv_obj_set_style_text_color(emoji_label_, lv_color_white(), 0);
+         lv_obj_set_style_text_color(chat_message_label_, lv_color_white(), 0);
+     }
+ };
+diff --git a/main/boards/magiclick-c3-v2/magiclick_c3_v2_board.cc b/main/boards/magiclick-c3-v2/magiclick_c3_v2_board.cc
+index 19f09ae..19f564f 100644
+--- a/main/boards/magiclick-c3-v2/magiclick_c3_v2_board.cc
++++ b/main/boards/magiclick-c3-v2/magiclick_c3_v2_board.cc
+@@ -44,7 +44,7 @@ public:
+         // 设置内容区背景色和文本颜色
+         lv_obj_set_style_bg_color(content_, lv_color_black(), 0);
+         lv_obj_set_style_border_width(content_, 0, 0);
+-        lv_obj_set_style_text_color(emotion_label_, lv_color_white(), 0);
++        lv_obj_set_style_text_color(emoji_label_, lv_color_white(), 0);
+         lv_obj_set_style_text_color(chat_message_label_, lv_color_white(), 0);
+     }   
+ };
+diff --git a/main/boards/magiclick-c3/magiclick_c3_board.cc b/main/boards/magiclick-c3/magiclick_c3_board.cc
+index 39af08e..373e661 100644
+--- a/main/boards/magiclick-c3/magiclick_c3_board.cc
++++ b/main/boards/magiclick-c3/magiclick_c3_board.cc
+@@ -42,7 +42,7 @@ public:
+         // 设置内容区背景色和文本颜色
+         lv_obj_set_style_bg_color(content_, lv_color_black(), 0);
+         lv_obj_set_style_border_width(content_, 0, 0);
+-        lv_obj_set_style_text_color(emotion_label_, lv_color_white(), 0);
++        lv_obj_set_style_text_color(emoji_label_, lv_color_white(), 0);
+         lv_obj_set_style_text_color(chat_message_label_, lv_color_white(), 0);
+     }
+ };
+diff --git a/main/boards/otto-robot/config.json b/main/boards/otto-robot/config.json
+index 36bcf33..a00a827 100644
+--- a/main/boards/otto-robot/config.json
++++ b/main/boards/otto-robot/config.json
+@@ -4,7 +4,8 @@
+         {
+             "name": "otto-robot",
+             "sdkconfig_append": [
+-                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v1/16m.csv\""
++                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v1/16m.csv\"",
++                "CONFIG_LVGL_USE_GIF=y"
+             ]
+         }
+     ]
+diff --git a/main/boards/otto-robot/otto_emoji_display.cc b/main/boards/otto-robot/otto_emoji_display.cc
+index 8853c82..32158ff 100644
+--- a/main/boards/otto-robot/otto_emoji_display.cc
++++ b/main/boards/otto-robot/otto_emoji_display.cc
+@@ -61,8 +61,8 @@ OttoEmojiDisplay::OttoEmojiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
+ void OttoEmojiDisplay::SetupGifContainer() {
+     DisplayLockGuard lock(this);
+ 
+-    if (emotion_label_) {
+-        lv_obj_del(emotion_label_);
++    if (emoji_label_) {
++        lv_obj_del(emoji_label_);
+     }
+ 
+     if (chat_message_label_) {
+@@ -80,11 +80,11 @@ void OttoEmojiDisplay::SetupGifContainer() {
+     lv_obj_set_flex_grow(content_, 1);
+     lv_obj_center(content_);
+ 
+-    emotion_label_ = lv_label_create(content_);
+-    lv_label_set_text(emotion_label_, "");
+-    lv_obj_set_width(emotion_label_, 0);
+-    lv_obj_set_style_border_width(emotion_label_, 0, 0);
+-    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++    emoji_label_ = lv_label_create(content_);
++    lv_label_set_text(emoji_label_, "");
++    lv_obj_set_width(emoji_label_, 0);
++    lv_obj_set_style_border_width(emoji_label_, 0, 0);
++    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+ 
+     emotion_gif_ = lv_gif_create(content_);
+     int gif_size = LV_HOR_RES;
+diff --git a/main/boards/sensecap-watcher/sensecap_watcher.cc b/main/boards/sensecap-watcher/sensecap_watcher.cc
+index a34eb37..bdc7351 100644
+--- a/main/boards/sensecap-watcher/sensecap_watcher.cc
++++ b/main/boards/sensecap-watcher/sensecap_watcher.cc
+@@ -9,6 +9,7 @@
+ #include "led/single_led.h"
+ #include "power_save_timer.h"
+ #include "sscma_camera.h"
++#include "lvgl_theme.h"
+ 
+ #include <esp_log.h>
+ #include "esp_check.h"
+diff --git a/main/boards/sensecap-watcher/sscma_camera.cc b/main/boards/sensecap-watcher/sscma_camera.cc
+index e56f1c0..a6c3e0c 100644
+--- a/main/boards/sensecap-watcher/sscma_camera.cc
++++ b/main/boards/sensecap-watcher/sscma_camera.cc
+@@ -1,6 +1,6 @@
+ #include "sscma_camera.h"
+ #include "mcp_server.h"
+-#include "display.h"
++#include "lvgl_display.h"
+ #include "board.h"
+ #include "system_info.h"
+ #include "config.h"
+@@ -243,7 +243,7 @@ bool SscmaCamera::Capture() {
+     }
+ 
+     // 显示预览图片
+-    auto display = Board::GetInstance().GetDisplay();
++    auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+     if (display != nullptr) {
+         display->SetPreviewImage(&preview_image_);
+     }
+diff --git a/main/display/display.cc b/main/display/display.cc
+index 46b4fcb..d352e02 100644
+--- a/main/display/display.cc
++++ b/main/display/display.cc
+@@ -40,21 +40,17 @@ void Display::SetEmotion(const char* emotion) {
+     ESP_LOGW(TAG, "SetEmotion: %s", emotion);
+ }
+ 
+-void Display::SetPreviewImage(const lv_img_dsc_t* image) {
+-    // Do nothing but free the image
+-    if (image != nullptr) {
+-        heap_caps_free((void*)image->data);
+-        heap_caps_free((void*)image);
+-    }
+-}
+-
+ void Display::SetChatMessage(const char* role, const char* content) {
+     ESP_LOGW(TAG, "Role:%s", role);
+     ESP_LOGW(TAG, "     %s", content);
+ }
+ 
+ void Display::SetTheme(Theme* theme) {
++    current_theme_ = theme;
++    Settings settings("display", true);
++    settings.SetString("theme", theme->name());
+ }
+ 
+ void Display::SetPowerSaveMode(bool on) {
++    ESP_LOGW(TAG, "SetPowerSaveMode: %d", on);
+ }
+diff --git a/main/display/display.h b/main/display/display.h
+index 618d70b..f577b26 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -3,7 +3,11 @@
+ 
+ #include "emoji_collection.h"
+ 
++#ifdef LVGL_VERSION_MAJOR
++#define HAVE_LVGL 1
+ #include <lvgl.h>
++#endif
++
+ #include <esp_timer.h>
+ #include <esp_log.h>
+ #include <esp_pm.h>
+@@ -31,7 +35,6 @@ public:
+     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+     virtual void SetEmotion(const char* emotion);
+     virtual void SetChatMessage(const char* role, const char* content);
+-    virtual void SetPreviewImage(const lv_img_dsc_t* image);
+     virtual void SetTheme(Theme* theme);
+     virtual Theme* GetTheme() { return current_theme_; }
+     virtual void UpdateStatusBar(bool update_all = false);
+diff --git a/main/display/lcd_display.cc b/main/display/lcd_display.cc
+index 7878a3b..f2c7da8 100644
+--- a/main/display/lcd_display.cc
++++ b/main/display/lcd_display.cc
+@@ -1,4 +1,5 @@
+ #include "lcd_display.h"
++#include "gif/lvgl_gif.h"
+ #include "settings.h"
+ #include "lvgl_theme.h"
+ #include "assets/lang_config.h"
+@@ -282,12 +283,33 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
+ 
+ LcdDisplay::~LcdDisplay() {
+     SetPreviewImage(nullptr);
++    
++    // Clean up GIF controller
++    if (gif_controller_) {
++        gif_controller_->Stop();
++        gif_controller_.reset();
++    }
++    
+     if (preview_timer_ != nullptr) {
+         esp_timer_stop(preview_timer_);
+         esp_timer_delete(preview_timer_);
+     }
+ 
+-    // 然后再清理 LVGL 对象
++    if (preview_image_ != nullptr) {
++        lv_obj_del(preview_image_);
++    }
++    if (chat_message_label_ != nullptr) {
++        lv_obj_del(chat_message_label_);
++    }
++    if (emoji_label_ != nullptr) {
++        lv_obj_del(emoji_label_);
++    }
++    if (emoji_image_ != nullptr) {
++        lv_obj_del(emoji_image_);
++    }
++    if (emoji_box_ != nullptr) {
++        lv_obj_del(emoji_box_);
++    }
+     if (content_ != nullptr) {
+         lv_obj_del(content_);
+     }
+@@ -337,6 +359,7 @@ void LcdDisplay::SetupUI() {
+     /* Container */
+     container_ = lv_obj_create(screen);
+     lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
++    lv_obj_set_style_radius(container_, 0, 0);
+     lv_obj_set_flex_flow(container_, LV_FLEX_FLOW_COLUMN);
+     lv_obj_set_style_pad_all(container_, 0, 0);
+     lv_obj_set_style_border_width(container_, 0, 0);
+@@ -431,11 +454,11 @@ void LcdDisplay::SetupUI() {
+     lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, text_font->line_height + lvgl_theme->spacing(2));
+ 
+     // Display AI logo while booting
+-    emotion_label_ = lv_label_create(screen);
+-    lv_obj_center(emotion_label_);
+-    lv_obj_set_style_text_font(emotion_label_, large_icon_font, 0);
+-    lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+-    lv_label_set_text(emotion_label_, FONT_AWESOME_MICROCHIP_AI);
++    emoji_label_ = lv_label_create(screen);
++    lv_obj_center(emoji_label_);
++    lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
++    lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
++    lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+ }
+ #if CONFIG_IDF_TARGET_ESP32P4
+ #define  MAX_MESSAGES 40
+@@ -483,7 +506,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+         }
+     } else {
+         // 隐藏居中显示的 AI logo
+-        lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+     }
+ 
+     //避免出现空的消息框
+@@ -729,6 +752,7 @@ void LcdDisplay::SetupUI() {
+     /* Container */
+     container_ = lv_obj_create(screen);
+     lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
++    lv_obj_set_style_radius(container_, 0, 0);
+     lv_obj_set_flex_flow(container_, LV_FLEX_FLOW_COLUMN);
+     lv_obj_set_style_pad_all(container_, 0, 0);
+     lv_obj_set_style_border_width(container_, 0, 0);
+@@ -769,13 +793,14 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_pad_all(emoji_box_, 0, 0);
+     lv_obj_set_style_border_width(emoji_box_, 0, 0);
+ 
+-    emotion_label_ = lv_label_create(emoji_box_);
+-    lv_obj_set_style_text_font(emotion_label_, large_icon_font, 0);
+-    lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+-    lv_label_set_text(emotion_label_, FONT_AWESOME_MICROCHIP_AI);
++    emoji_label_ = lv_label_create(emoji_box_);
++    lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
++    lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
++    lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+ 
+     emoji_image_ = lv_img_create(emoji_box_);
+     lv_obj_center(emoji_image_);
++    lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+ 
+     preview_image_ = lv_image_create(content_);
+     lv_obj_set_size(preview_image_, width_ / 2, height_ / 2);
+@@ -865,39 +890,81 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
+         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+     }
+ }
++
++void LcdDisplay::SetChatMessage(const char* role, const char* content) {
++    DisplayLockGuard lock(this);
++    if (chat_message_label_ == nullptr) {
++        return;
++    }
++    lv_label_set_text(chat_message_label_, content);
++}
+ #endif
+ 
+ void LcdDisplay::SetEmotion(const char* emotion) {
++    // Stop any running GIF animation
++    if (gif_controller_) {
++        DisplayLockGuard lock(this);
++        gif_controller_->Stop();
++        gif_controller_.reset();
++    }
++    
+     if (emoji_image_ == nullptr) {
+         return;
+     }
+ 
+     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
+-    auto img_dsc = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
+-    if (img_dsc == nullptr) {
++    auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
++    if (image == nullptr) {
+         const char* utf8 = font_awesome_get_utf8(emotion);
+-        if (utf8 != nullptr && emotion_label_ != nullptr) {
++        if (utf8 != nullptr && emoji_label_ != nullptr) {
+             DisplayLockGuard lock(this);
+-            lv_label_set_text(emotion_label_, utf8);
+-            lv_obj_remove_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++            lv_label_set_text(emoji_label_, utf8);
+             lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++            lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+         }
+         return;
+     }
+ 
+     DisplayLockGuard lock(this);
+-    lv_image_set_src(emoji_image_, img_dsc);
++    if (image->IsGif()) {
++        // Create new GIF controller
++        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
++        
++        if (gif_controller_->IsLoaded()) {
++            // Set up frame update callback
++            gif_controller_->SetFrameCallback([this]() {
++                lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
++            });
++            
++            // Set initial frame and start animation
++            lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
++            gif_controller_->Start();
++            
++            // Show GIF, hide others
++            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
++            lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++        } else {
++            ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
++            gif_controller_.reset();
++        }
++    } else {
++        lv_image_set_src(emoji_image_, image->image_dsc());
++        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++    }
++
+ #if CONFIG_USE_WECHAT_MESSAGE_STYLE
+-    // Wechat message style中，如果emotion是neutral，则隐藏emoji_image_
++    // Wechat message style中，如果emotion是neutral，则不显示
+     if (strcmp(emotion, "neutral") == 0) {
++        // Stop GIF animation if running
++        if (gif_controller_) {
++            gif_controller_->Stop();
++            gif_controller_.reset();
++        }
++        
+         lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+-    } else {
+-        lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+     }
+-#else
+-    // 显示emoji_image_，隐藏emotion_label_, preview_image_
+-    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+-    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+ #endif
+ }
+ 
+@@ -913,9 +980,8 @@ void LcdDisplay::SetTheme(Theme* theme) {
+     auto text_font = lvgl_theme->text_font()->font();
+     auto icon_font = lvgl_theme->icon_font()->font();
+     auto large_icon_font = lvgl_theme->large_icon_font()->font();
+-    lv_obj_set_style_text_font(screen, text_font, 0);
+ 
+-    if (text_font->line_height >= 30) {
++    if (text_font->line_height >= 40) {
+         lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
+         lv_obj_set_style_text_font(battery_label_, large_icon_font, 0);
+         lv_obj_set_style_text_font(network_label_, large_icon_font, 0);
+@@ -925,129 +991,112 @@ void LcdDisplay::SetTheme(Theme* theme) {
+         lv_obj_set_style_text_font(network_label_, icon_font, 0);
+     }
+ 
+-    // Update the screen colors
+-    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
++    // Set parent text color
++    lv_obj_set_style_text_font(screen, text_font, 0);
+     lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
+-    
+-    // Update container colors
+-    if (container_ != nullptr) {
++
++    // Set background image
++    if (lvgl_theme->background_image() != nullptr) {
++        lv_obj_set_style_bg_image_src(container_, lvgl_theme->background_image()->image_dsc(), 0);
++    } else {
++        lv_obj_set_style_bg_image_src(container_, nullptr, 0);
+         lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
+-        lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+     }
+     
+-    // Update status bar colors
+-    if (status_bar_ != nullptr) {
+-        lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
+-        lv_obj_set_style_text_color(status_bar_, lvgl_theme->text_color(), 0);
++    // Update status bar background color with 50% opacity
++    lv_obj_set_style_bg_opa(status_bar_, LV_OPA_50, 0);
++    lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
++    
++    // Update status bar elements
++    lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
++
++    // Set content background opacity
++    lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
++
++    // If we have the chat message style, update all message bubbles
++#if CONFIG_USE_WECHAT_MESSAGE_STYLE
++    // Iterate through all children of content (message containers or bubbles)
++    uint32_t child_count = lv_obj_get_child_cnt(content_);
++    for (uint32_t i = 0; i < child_count; i++) {
++        lv_obj_t* obj = lv_obj_get_child(content_, i);
++        if (obj == nullptr) continue;
+         
+-        // Update status bar elements
+-        if (network_label_ != nullptr) {
+-            lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+-        }
+-        if (status_label_ != nullptr) {
+-            lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+-        }
+-        if (notification_label_ != nullptr) {
+-            lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+-        }
+-        if (mute_label_ != nullptr) {
+-            lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
+-        }
+-        if (battery_label_ != nullptr) {
+-            lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
+-        }
+-        if (emotion_label_ != nullptr) {
+-            lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
++        lv_obj_t* bubble = nullptr;
++        
++        // 检查这个对象是容器还是气泡
++        // 如果是容器（用户或系统消息），则获取其子对象作为气泡
++        // 如果是气泡（助手消息），则直接使用
++        if (lv_obj_get_child_cnt(obj) > 0) {
++            // 可能是容器，检查它是否为用户或系统消息容器
++            // 用户和系统消息容器是透明的
++            lv_opa_t bg_opa = lv_obj_get_style_bg_opa(obj, 0);
++            if (bg_opa == LV_OPA_TRANSP) {
++                // 这是用户或系统消息的容器
++                bubble = lv_obj_get_child(obj, 0);
++            } else {
++                // 这可能是助手消息的气泡自身
++                bubble = obj;
++            }
++        } else {
++            // 没有子元素，可能是其他UI元素，跳过
++            continue;
+         }
+-    }
+-    
+-    // Update content area colors
+-    if (content_ != nullptr) {
+-        lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
+-        lv_obj_set_style_border_color(content_, lvgl_theme->border_color(), 0);
+         
+-        // If we have the chat message style, update all message bubbles
+-#if CONFIG_USE_WECHAT_MESSAGE_STYLE
+-        // Iterate through all children of content (message containers or bubbles)
+-        uint32_t child_count = lv_obj_get_child_cnt(content_);
+-        for (uint32_t i = 0; i < child_count; i++) {
+-            lv_obj_t* obj = lv_obj_get_child(content_, i);
+-            if (obj == nullptr) continue;
+-            
+-            lv_obj_t* bubble = nullptr;
++        if (bubble == nullptr) continue;
++        
++        // 使用保存的用户数据来识别气泡类型
++        void* bubble_type_ptr = lv_obj_get_user_data(bubble);
++        if (bubble_type_ptr != nullptr) {
++            const char* bubble_type = static_cast<const char*>(bubble_type_ptr);
+             
+-            // 检查这个对象是容器还是气泡
+-            // 如果是容器（用户或系统消息），则获取其子对象作为气泡
+-            // 如果是气泡（助手消息），则直接使用
+-            if (lv_obj_get_child_cnt(obj) > 0) {
+-                // 可能是容器，检查它是否为用户或系统消息容器
+-                // 用户和系统消息容器是透明的
+-                lv_opa_t bg_opa = lv_obj_get_style_bg_opa(obj, 0);
+-                if (bg_opa == LV_OPA_TRANSP) {
+-                    // 这是用户或系统消息的容器
+-                    bubble = lv_obj_get_child(obj, 0);
+-                } else {
+-                    // 这可能是助手消息的气泡自身
+-                    bubble = obj;
+-                }
+-            } else {
+-                // 没有子元素，可能是其他UI元素，跳过
+-                continue;
++            // 根据气泡类型应用正确的颜色
++            if (strcmp(bubble_type, "user") == 0) {
++                lv_obj_set_style_bg_color(bubble, lvgl_theme->user_bubble_color(), 0);
++            } else if (strcmp(bubble_type, "assistant") == 0) {
++                lv_obj_set_style_bg_color(bubble, lvgl_theme->assistant_bubble_color(), 0); 
++            } else if (strcmp(bubble_type, "system") == 0) {
++                lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
++            } else if (strcmp(bubble_type, "image") == 0) {
++                lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
+             }
+             
+-            if (bubble == nullptr) continue;
++            // Update border color
++            lv_obj_set_style_border_color(bubble, lvgl_theme->border_color(), 0);
+             
+-            // 使用保存的用户数据来识别气泡类型
+-            void* bubble_type_ptr = lv_obj_get_user_data(bubble);
+-            if (bubble_type_ptr != nullptr) {
+-                const char* bubble_type = static_cast<const char*>(bubble_type_ptr);
+-                
+-                // 根据气泡类型应用正确的颜色
+-                if (strcmp(bubble_type, "user") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, lvgl_theme->user_bubble_color(), 0);
+-                } else if (strcmp(bubble_type, "assistant") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, lvgl_theme->assistant_bubble_color(), 0); 
+-                } else if (strcmp(bubble_type, "system") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
+-                } else if (strcmp(bubble_type, "image") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
+-                }
+-                
+-                // Update border color
+-                lv_obj_set_style_border_color(bubble, lvgl_theme->border_color(), 0);
+-                
+-                // Update text color for the message
+-                if (lv_obj_get_child_cnt(bubble) > 0) {
+-                    lv_obj_t* text = lv_obj_get_child(bubble, 0);
+-                    if (text != nullptr) {
+-                        // 根据气泡类型设置文本颜色
+-                        if (strcmp(bubble_type, "system") == 0) {
+-                            lv_obj_set_style_text_color(text, lvgl_theme->system_text_color(), 0);
+-                        } else {
+-                            lv_obj_set_style_text_color(text, lvgl_theme->text_color(), 0);
+-                        }
++            // Update text color for the message
++            if (lv_obj_get_child_cnt(bubble) > 0) {
++                lv_obj_t* text = lv_obj_get_child(bubble, 0);
++                if (text != nullptr) {
++                    // 根据气泡类型设置文本颜色
++                    if (strcmp(bubble_type, "system") == 0) {
++                        lv_obj_set_style_text_color(text, lvgl_theme->system_text_color(), 0);
++                    } else {
++                        lv_obj_set_style_text_color(text, lvgl_theme->text_color(), 0);
+                     }
+                 }
+-            } else {
+-                ESP_LOGW(TAG, "child[%lu] Bubble type is not found", i);
+             }
++        } else {
++            ESP_LOGW(TAG, "child[%lu] Bubble type is not found", i);
+         }
++    }
+ #else
+-        // Simple UI mode - just update the main chat message
+-        if (chat_message_label_ != nullptr) {
+-            lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
+-        }
+-        
+-        if (emotion_label_ != nullptr) {
+-            lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+-        }
+-#endif
++    // Simple UI mode - just update the main chat message
++    if (chat_message_label_ != nullptr) {
++        lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
+     }
+     
+-    // Update low battery popup
+-    if (low_battery_popup_ != nullptr) {
+-        lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
++    if (emoji_label_ != nullptr) {
++        lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
+     }
++#endif
++    
++    // Update low battery popup
++    lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+ 
+     // No errors occurred. Save theme to settings
+     Display::SetTheme(lvgl_theme);
+diff --git a/main/display/lcd_display.h b/main/display/lcd_display.h
+index ee0c56b..54cc484 100644
+--- a/main/display/lcd_display.h
++++ b/main/display/lcd_display.h
+@@ -2,6 +2,7 @@
+ #define LCD_DISPLAY_H
+ 
+ #include "lvgl_display.h"
++#include "gif/lvgl_gif.h"
+ 
+ #include <esp_lcd_panel_io.h>
+ #include <esp_lcd_panel_ops.h>
+@@ -24,8 +25,11 @@ protected:
+     lv_obj_t* container_ = nullptr;
+     lv_obj_t* side_bar_ = nullptr;
+     lv_obj_t* preview_image_ = nullptr;
++    lv_obj_t* emoji_label_ = nullptr;
+     lv_obj_t* emoji_image_ = nullptr;
++    std::unique_ptr<LvglGif> gif_controller_ = nullptr;
+     lv_obj_t* emoji_box_ = nullptr;
++    lv_obj_t* chat_message_label_ = nullptr;
+     esp_timer_handle_t preview_timer_ = nullptr;
+ 
+     void InitializeLcdThemes();
+@@ -41,9 +45,7 @@ public:
+     ~LcdDisplay();
+     virtual void SetEmotion(const char* emotion) override;
+     virtual void SetPreviewImage(const lv_img_dsc_t* img_dsc) override;
+-#if CONFIG_USE_WECHAT_MESSAGE_STYLE
+     virtual void SetChatMessage(const char* role, const char* content) override; 
+-#endif  
+ 
+     // Add theme switching function
+     virtual void SetTheme(Theme* theme) override;
+diff --git a/main/display/lvgl_display/emoji_collection.cc b/main/display/lvgl_display/emoji_collection.cc
+index 3ab3ce3..c9a1a60 100644
+--- a/main/display/lvgl_display/emoji_collection.cc
++++ b/main/display/lvgl_display/emoji_collection.cc
+@@ -6,6 +6,27 @@
+ 
+ #define TAG "EmojiCollection"
+ 
++void EmojiCollection::AddEmoji(const std::string& name, LvglImage* image) {
++    emoji_collection_[name] = image;
++}
++
++const LvglImage* EmojiCollection::GetEmojiImage(const char* name) {
++    auto it = emoji_collection_.find(name);
++    if (it != emoji_collection_.end()) {
++        return it->second;
++    }
++
++    ESP_LOGW(TAG, "Emoji not found: %s", name);
++    return nullptr;
++}
++
++EmojiCollection::~EmojiCollection() {
++    for (auto it = emoji_collection_.begin(); it != emoji_collection_.end(); ++it) {
++        delete it->second;
++    }
++    emoji_collection_.clear();
++}
++
+ // These are declared in xiaozhi-fonts/src/font_emoji_32.c
+ extern const lv_image_dsc_t emoji_1f636_32; // neutral
+ extern const lv_image_dsc_t emoji_1f642_32; // happy
+@@ -29,38 +50,28 @@ extern const lv_image_dsc_t emoji_1f634_32; // sleepy
+ extern const lv_image_dsc_t emoji_1f61c_32; // silly
+ extern const lv_image_dsc_t emoji_1f644_32; // confused
+ 
+-const lv_img_dsc_t* Twemoji32::GetEmojiImage(const char* name) const {
+-    static const std::unordered_map<std::string, const lv_img_dsc_t*> emoji_map = {
+-        {"neutral", &emoji_1f636_32},
+-        {"happy", &emoji_1f642_32},
+-        {"laughing", &emoji_1f606_32},
+-        {"funny", &emoji_1f602_32},
+-        {"sad", &emoji_1f614_32},
+-        {"angry", &emoji_1f620_32},
+-        {"crying", &emoji_1f62d_32},
+-        {"loving", &emoji_1f60d_32},
+-        {"embarrassed", &emoji_1f633_32},
+-        {"surprised", &emoji_1f62f_32},
+-        {"shocked", &emoji_1f631_32},
+-        {"thinking", &emoji_1f914_32},
+-        {"winking", &emoji_1f609_32},
+-        {"cool", &emoji_1f60e_32},
+-        {"relaxed", &emoji_1f60c_32},
+-        {"delicious", &emoji_1f924_32},
+-        {"kissy", &emoji_1f618_32},
+-        {"confident", &emoji_1f60f_32},
+-        {"sleepy", &emoji_1f634_32},
+-        {"silly", &emoji_1f61c_32},
+-        {"confused", &emoji_1f644_32},
+-    };
+-    
+-    auto it = emoji_map.find(name);
+-    if (it != emoji_map.end()) {
+-        return it->second;
+-    }
+-    
+-    ESP_LOGW(TAG, "Emoji not found: %s", name);
+-    return nullptr;
++Twemoji32::Twemoji32() {
++    AddEmoji("neutral", new LvglSourceImage(&emoji_1f636_32));
++    AddEmoji("happy", new LvglSourceImage(&emoji_1f642_32));
++    AddEmoji("laughing", new LvglSourceImage(&emoji_1f606_32));
++    AddEmoji("funny", new LvglSourceImage(&emoji_1f602_32));
++    AddEmoji("sad", new LvglSourceImage(&emoji_1f614_32));
++    AddEmoji("angry", new LvglSourceImage(&emoji_1f620_32));
++    AddEmoji("crying", new LvglSourceImage(&emoji_1f62d_32));
++    AddEmoji("loving", new LvglSourceImage(&emoji_1f60d_32));
++    AddEmoji("embarrassed", new LvglSourceImage(&emoji_1f633_32));
++    AddEmoji("surprised", new LvglSourceImage(&emoji_1f62f_32));
++    AddEmoji("shocked", new LvglSourceImage(&emoji_1f631_32));
++    AddEmoji("thinking", new LvglSourceImage(&emoji_1f914_32));
++    AddEmoji("winking", new LvglSourceImage(&emoji_1f609_32));
++    AddEmoji("cool", new LvglSourceImage(&emoji_1f60e_32));
++    AddEmoji("relaxed", new LvglSourceImage(&emoji_1f60c_32));
++    AddEmoji("delicious", new LvglSourceImage(&emoji_1f924_32));
++    AddEmoji("kissy", new LvglSourceImage(&emoji_1f618_32));
++    AddEmoji("confident", new LvglSourceImage(&emoji_1f60f_32));
++    AddEmoji("sleepy", new LvglSourceImage(&emoji_1f634_32));
++    AddEmoji("silly", new LvglSourceImage(&emoji_1f61c_32));
++    AddEmoji("confused", new LvglSourceImage(&emoji_1f644_32));
+ }
+ 
+ 
+@@ -87,58 +98,26 @@ extern const lv_image_dsc_t emoji_1f634_64; // sleepy
+ extern const lv_image_dsc_t emoji_1f61c_64; // silly
+ extern const lv_image_dsc_t emoji_1f644_64; // confused
+ 
+-const lv_img_dsc_t* Twemoji64::GetEmojiImage(const char* name) const {
+-    static const std::unordered_map<std::string, const lv_img_dsc_t*> emoji_map = {
+-        {"neutral", &emoji_1f636_64},
+-        {"happy", &emoji_1f642_64},
+-        {"laughing", &emoji_1f606_64},
+-        {"funny", &emoji_1f602_64},
+-        {"sad", &emoji_1f614_64},
+-        {"angry", &emoji_1f620_64},
+-        {"crying", &emoji_1f62d_64},
+-        {"loving", &emoji_1f60d_64},
+-        {"embarrassed", &emoji_1f633_64},
+-        {"surprised", &emoji_1f62f_64},
+-        {"shocked", &emoji_1f631_64},
+-        {"thinking", &emoji_1f914_64},
+-        {"winking", &emoji_1f609_64},
+-        {"cool", &emoji_1f60e_64},
+-        {"relaxed", &emoji_1f60c_64},
+-        {"delicious", &emoji_1f924_64},
+-        {"kissy", &emoji_1f618_64},
+-        {"confident", &emoji_1f60f_64},
+-        {"sleepy", &emoji_1f634_64},
+-        {"silly", &emoji_1f61c_64},
+-        {"confused", &emoji_1f644_64},
+-    };
+-    
+-    auto it = emoji_map.find(name);
+-    if (it != emoji_map.end()) {
+-        return it->second;
+-    }
+-    
+-    ESP_LOGW(TAG, "Emoji not found: %s", name);
+-    return nullptr;
++Twemoji64::Twemoji64() {
++    AddEmoji("neutral", new LvglSourceImage(&emoji_1f636_64));
++    AddEmoji("happy", new LvglSourceImage(&emoji_1f642_64));
++    AddEmoji("laughing", new LvglSourceImage(&emoji_1f606_64));
++    AddEmoji("funny", new LvglSourceImage(&emoji_1f602_64));
++    AddEmoji("sad", new LvglSourceImage(&emoji_1f614_64));
++    AddEmoji("angry", new LvglSourceImage(&emoji_1f620_64));
++    AddEmoji("crying", new LvglSourceImage(&emoji_1f62d_64));
++    AddEmoji("loving", new LvglSourceImage(&emoji_1f60d_64));
++    AddEmoji("embarrassed", new LvglSourceImage(&emoji_1f633_64));
++    AddEmoji("surprised", new LvglSourceImage(&emoji_1f62f_64));
++    AddEmoji("shocked", new LvglSourceImage(&emoji_1f631_64));
++    AddEmoji("thinking", new LvglSourceImage(&emoji_1f914_64));
++    AddEmoji("winking", new LvglSourceImage(&emoji_1f609_64));
++    AddEmoji("cool", new LvglSourceImage(&emoji_1f60e_64));
++    AddEmoji("relaxed", new LvglSourceImage(&emoji_1f60c_64));
++    AddEmoji("delicious", new LvglSourceImage(&emoji_1f924_64));
++    AddEmoji("kissy", new LvglSourceImage(&emoji_1f618_64));
++    AddEmoji("confident", new LvglSourceImage(&emoji_1f60f_64));
++    AddEmoji("sleepy", new LvglSourceImage(&emoji_1f634_64));
++    AddEmoji("silly", new LvglSourceImage(&emoji_1f61c_64));
++    AddEmoji("confused", new LvglSourceImage(&emoji_1f644_64));
+ }
+-
+-
+-void CustomEmojiCollection::AddEmoji(const std::string& name, LvglImage* image) {
+-    emoji_collection_[name] = image;
+-}
+-
+-const lv_img_dsc_t* CustomEmojiCollection::GetEmojiImage(const char* name) const {
+-    auto it = emoji_collection_.find(name);
+-    if (it != emoji_collection_.end()) {
+-        return it->second->image_dsc();
+-    }
+-
+-    ESP_LOGW(TAG, "Emoji not found: %s", name);
+-    return nullptr;
+-}
+-
+-CustomEmojiCollection::~CustomEmojiCollection() {
+-    for (auto it = emoji_collection_.begin(); it != emoji_collection_.end(); ++it) {
+-        delete it->second;
+-    }
+-    emoji_collection_.clear();
+-}
+\ No newline at end of file
+diff --git a/main/display/lvgl_display/emoji_collection.h b/main/display/lvgl_display/emoji_collection.h
+index 44c54e1..c9eac05 100644
+--- a/main/display/lvgl_display/emoji_collection.h
++++ b/main/display/lvgl_display/emoji_collection.h
+@@ -13,28 +13,22 @@
+ // Define interface for emoji collection
+ class EmojiCollection {
+ public:
+-    virtual const lv_img_dsc_t* GetEmojiImage(const char* name) const = 0;
+-    virtual ~EmojiCollection() = default;
++    virtual void AddEmoji(const std::string& name, LvglImage* image);
++    virtual const LvglImage* GetEmojiImage(const char* name);
++    virtual ~EmojiCollection();
++
++private:
++    std::map<std::string, LvglImage*> emoji_collection_;
+ };
+ 
+ class Twemoji32 : public EmojiCollection {
+ public:
+-    virtual const lv_img_dsc_t* GetEmojiImage(const char* name) const override;
++    Twemoji32();
+ };
+ 
+ class Twemoji64 : public EmojiCollection {
+ public:
+-    virtual const lv_img_dsc_t* GetEmojiImage(const char* name) const override;
+-};
+-
+-class CustomEmojiCollection : public EmojiCollection {
+-private:
+-    std::map<std::string, LvglImage*> emoji_collection_;
+-
+-public:
+-    void AddEmoji(const std::string& name, LvglImage* image);
+-    virtual const lv_img_dsc_t* GetEmojiImage(const char* name) const override;
+-    virtual ~CustomEmojiCollection();
++    Twemoji64();
+ };
+ 
+ #endif
+diff --git a/main/display/lvgl_display/gif/LICENSE.txt b/main/display/lvgl_display/gif/LICENSE.txt
+new file mode 100644
+index 0000000..c53d519
+--- /dev/null
++++ b/main/display/lvgl_display/gif/LICENSE.txt
+@@ -0,0 +1,2 @@
++All of the source code and documentation for gifdec is released into the
++public domain and provided without warranty of any kind.
+diff --git a/main/display/lvgl_display/gif/gifdec.c b/main/display/lvgl_display/gif/gifdec.c
+new file mode 100644
+index 0000000..dc2b8c4
+--- /dev/null
++++ b/main/display/lvgl_display/gif/gifdec.c
+@@ -0,0 +1,818 @@
++#include "gifdec.h"
++
++#include <stdlib.h>
++#include <string.h>
++#include <stdbool.h>
++
++#define MIN(A, B) ((A) < (B) ? (A) : (B))
++#define MAX(A, B) ((A) > (B) ? (A) : (B))
++
++typedef struct Entry {
++    uint16_t length;
++    uint16_t prefix;
++    uint8_t  suffix;
++} Entry;
++
++typedef struct Table {
++    int bulk;
++    int nentries;
++    Entry * entries;
++} Table;
++
++#if LV_GIF_CACHE_DECODE_DATA
++#define LZW_MAXBITS                 12
++#define LZW_TABLE_SIZE              (1 << LZW_MAXBITS)
++#define LZW_CACHE_SIZE              (LZW_TABLE_SIZE * 4)
++#endif
++
++static gd_GIF  * gif_open(gd_GIF * gif);
++static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file);
++static void f_gif_read(gd_GIF * gif, void * buf, size_t len);
++static int f_gif_seek(gd_GIF * gif, size_t pos, int k);
++static void f_gif_close(gd_GIF * gif);
++
++#if LV_USE_DRAW_SW_ASM == LV_DRAW_SW_ASM_HELIUM
++    #include "gifdec_mve.h"
++#endif
++
++static uint16_t
++read_num(gd_GIF * gif)
++{
++    uint8_t bytes[2];
++
++    f_gif_read(gif, bytes, 2);
++    return bytes[0] + (((uint16_t) bytes[1]) << 8);
++}
++
++gd_GIF *
++gd_open_gif_file(const char * fname)
++{
++    gd_GIF gif_base;
++    memset(&gif_base, 0, sizeof(gif_base));
++
++    bool res = f_gif_open(&gif_base, fname, true);
++    if(!res) return NULL;
++
++    return gif_open(&gif_base);
++}
++
++gd_GIF *
++gd_open_gif_data(const void * data)
++{
++    gd_GIF gif_base;
++    memset(&gif_base, 0, sizeof(gif_base));
++
++    bool res = f_gif_open(&gif_base, data, false);
++    if(!res) return NULL;
++
++    return gif_open(&gif_base);
++}
++
++static gd_GIF * gif_open(gd_GIF * gif_base)
++{
++    uint8_t sigver[3];
++    uint16_t width, height, depth;
++    uint8_t fdsz, bgidx, aspect;
++    uint8_t * bgcolor;
++    int gct_sz;
++    gd_GIF * gif = NULL;
++
++    /* Header */
++    f_gif_read(gif_base, sigver, 3);
++    if(memcmp(sigver, "GIF", 3) != 0) {
++        LV_LOG_WARN("invalid signature");
++        goto fail;
++    }
++    /* Version */
++    f_gif_read(gif_base, sigver, 3);
++    if(memcmp(sigver, "89a", 3) != 0) {
++        LV_LOG_WARN("invalid version");
++        goto fail;
++    }
++    /* Width x Height */
++    width  = read_num(gif_base);
++    height = read_num(gif_base);
++    /* FDSZ */
++    f_gif_read(gif_base, &fdsz, 1);
++    /* Presence of GCT */
++    if(!(fdsz & 0x80)) {
++        LV_LOG_WARN("no global color table");
++        goto fail;
++    }
++    /* Color Space's Depth */
++    depth = ((fdsz >> 4) & 7) + 1;
++    /* Ignore Sort Flag. */
++    /* GCT Size */
++    gct_sz = 1 << ((fdsz & 0x07) + 1);
++    /* Background Color Index */
++    f_gif_read(gif_base, &bgidx, 1);
++    /* Aspect Ratio */
++    f_gif_read(gif_base, &aspect, 1);
++    /* Create gd_GIF Structure. */
++    if(0 == width || 0 == height){
++        LV_LOG_WARN("Zero size image");
++        goto fail;
++    }
++#if LV_GIF_CACHE_DECODE_DATA
++    if(0 == (INT_MAX - sizeof(gd_GIF) - LZW_CACHE_SIZE) / width / height / 5){
++        LV_LOG_WARN("Image dimensions are too large");
++        goto fail;
++    } 
++    gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height + LZW_CACHE_SIZE);
++#else
++    if(0 == (INT_MAX - sizeof(gd_GIF)) / width / height / 5){
++        LV_LOG_WARN("Image dimensions are too large");
++        goto fail;
++    } 
++    gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height);
++#endif
++    if(!gif) goto fail;
++    memcpy(gif, gif_base, sizeof(gd_GIF));
++    gif->width  = width;
++    gif->height = height;
++    gif->depth  = depth;
++    /* Read GCT */
++    gif->gct.size = gct_sz;
++    f_gif_read(gif, gif->gct.colors, 3 * gif->gct.size);
++    gif->palette = &gif->gct;
++    gif->bgindex = bgidx;
++    gif->canvas = (uint8_t *) &gif[1];
++    gif->frame = &gif->canvas[4 * width * height];
++    if(gif->bgindex) {
++        memset(gif->frame, gif->bgindex, gif->width * gif->height);
++    }
++    bgcolor = &gif->palette->colors[gif->bgindex * 3];
++    #if LV_GIF_CACHE_DECODE_DATA
++    gif->lzw_cache = gif->frame + width * height;
++    #endif
++
++#ifdef GIFDEC_FILL_BG
++    GIFDEC_FILL_BG(gif->canvas, gif->width * gif->height, 1, gif->width * gif->height, bgcolor, 0x00);
++#else
++    for(int i = 0; i < gif->width * gif->height; i++) {
++        gif->canvas[i * 4 + 0] = *(bgcolor + 2);
++        gif->canvas[i * 4 + 1] = *(bgcolor + 1);
++        gif->canvas[i * 4 + 2] = *(bgcolor + 0);
++        gif->canvas[i * 4 + 3] = 0x00;  // 初始化为透明，让第一帧根据自己的透明度设置来渲染
++    }
++#endif
++    gif->anim_start = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++    gif->loop_count = -1;
++    goto ok;
++fail:
++    f_gif_close(gif_base);
++ok:
++    return gif;
++}
++
++static void
++discard_sub_blocks(gd_GIF * gif)
++{
++    uint8_t size;
++
++    do {
++        f_gif_read(gif, &size, 1);
++        f_gif_seek(gif, size, LV_FS_SEEK_CUR);
++    } while(size);
++}
++
++static void
++read_plain_text_ext(gd_GIF * gif)
++{
++    if(gif->plain_text) {
++        uint16_t tx, ty, tw, th;
++        uint8_t cw, ch, fg, bg;
++        size_t sub_block;
++        f_gif_seek(gif, 1, LV_FS_SEEK_CUR); /* block size = 12 */
++        tx = read_num(gif);
++        ty = read_num(gif);
++        tw = read_num(gif);
++        th = read_num(gif);
++        f_gif_read(gif, &cw, 1);
++        f_gif_read(gif, &ch, 1);
++        f_gif_read(gif, &fg, 1);
++        f_gif_read(gif, &bg, 1);
++        sub_block = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++        gif->plain_text(gif, tx, ty, tw, th, cw, ch, fg, bg);
++        f_gif_seek(gif, sub_block, LV_FS_SEEK_SET);
++    }
++    else {
++        /* Discard plain text metadata. */
++        f_gif_seek(gif, 13, LV_FS_SEEK_CUR);
++    }
++    /* Discard plain text sub-blocks. */
++    discard_sub_blocks(gif);
++}
++
++static void
++read_graphic_control_ext(gd_GIF * gif)
++{
++    uint8_t rdit;
++
++    /* Discard block size (always 0x04). */
++    f_gif_seek(gif, 1, LV_FS_SEEK_CUR);
++    f_gif_read(gif, &rdit, 1);
++    gif->gce.disposal = (rdit >> 2) & 3;
++    gif->gce.input = rdit & 2;
++    gif->gce.transparency = rdit & 1;
++    gif->gce.delay = read_num(gif);
++    f_gif_read(gif, &gif->gce.tindex, 1);
++    /* Skip block terminator. */
++    f_gif_seek(gif, 1, LV_FS_SEEK_CUR);
++}
++
++static void
++read_comment_ext(gd_GIF * gif)
++{
++    if(gif->comment) {
++        size_t sub_block = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++        gif->comment(gif);
++        f_gif_seek(gif, sub_block, LV_FS_SEEK_SET);
++    }
++    /* Discard comment sub-blocks. */
++    discard_sub_blocks(gif);
++}
++
++static void
++read_application_ext(gd_GIF * gif)
++{
++    char app_id[8];
++    char app_auth_code[3];
++    uint16_t loop_count;
++
++    /* Discard block size (always 0x0B). */
++    f_gif_seek(gif, 1, LV_FS_SEEK_CUR);
++    /* Application Identifier. */
++    f_gif_read(gif, app_id, 8);
++    /* Application Authentication Code. */
++    f_gif_read(gif, app_auth_code, 3);
++    if(!strncmp(app_id, "NETSCAPE", sizeof(app_id))) {
++        /* Discard block size (0x03) and constant byte (0x01). */
++        f_gif_seek(gif, 2, LV_FS_SEEK_CUR);
++        loop_count = read_num(gif);
++        if(gif->loop_count < 0) {
++            if(loop_count == 0) {
++                gif->loop_count = 0;
++            }
++            else {
++                gif->loop_count = loop_count + 1;
++            }
++        }
++        /* Skip block terminator. */
++        f_gif_seek(gif, 1, LV_FS_SEEK_CUR);
++    }
++    else if(gif->application) {
++        size_t sub_block = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++        gif->application(gif, app_id, app_auth_code);
++        f_gif_seek(gif, sub_block, LV_FS_SEEK_SET);
++        discard_sub_blocks(gif);
++    }
++    else {
++        discard_sub_blocks(gif);
++    }
++}
++
++static void
++read_ext(gd_GIF * gif)
++{
++    uint8_t label;
++
++    f_gif_read(gif, &label, 1);
++    switch(label) {
++        case 0x01:
++            read_plain_text_ext(gif);
++            break;
++        case 0xF9:
++            read_graphic_control_ext(gif);
++            break;
++        case 0xFE:
++            read_comment_ext(gif);
++            break;
++        case 0xFF:
++            read_application_ext(gif);
++            break;
++        default:
++            LV_LOG_WARN("unknown extension: %02X\n", label);
++    }
++}
++
++static uint16_t
++get_key(gd_GIF *gif, int key_size, uint8_t *sub_len, uint8_t *shift, uint8_t *byte)
++{
++    int bits_read;
++    int rpad;
++    int frag_size;
++    uint16_t key;
++
++    key = 0;
++    for (bits_read = 0; bits_read < key_size; bits_read += frag_size) {
++        rpad = (*shift + bits_read) % 8;
++        if (rpad == 0) {
++            /* Update byte. */
++            if (*sub_len == 0) {
++                f_gif_read(gif, sub_len, 1); /* Must be nonzero! */
++                if (*sub_len == 0) return 0x1000;
++            }
++            f_gif_read(gif, byte, 1);
++            (*sub_len)--;
++        }
++        frag_size = MIN(key_size - bits_read, 8 - rpad);
++        key |= ((uint16_t) ((*byte) >> rpad)) << bits_read;
++    }
++    /* Clear extra bits to the left. */
++    key &= (1 << key_size) - 1;
++    *shift = (*shift + key_size) % 8;
++    return key;
++}
++
++#if LV_GIF_CACHE_DECODE_DATA
++/* Decompress image pixels.
++ * Return 0 on success or -1 on out-of-memory (w.r.t. LZW code table) or parse error. */
++static int
++read_image_data(gd_GIF *gif, int interlace)
++{
++    uint8_t sub_len, shift, byte;
++    int ret = 0;
++    int key_size;
++    int y, pass, linesize;
++    uint8_t *ptr = NULL;
++    uint8_t *ptr_row_start = NULL;
++    uint8_t *ptr_base = NULL;
++    size_t start, end;
++    uint16_t key, clear_code, stop_code, curr_code;
++    int frm_off, frm_size,curr_size,top_slot,new_codes,slot;
++    /* The first value of the value sequence corresponding to key */
++    int first_value;
++    int last_key;
++    uint8_t *sp = NULL;
++    uint8_t *p_stack = NULL;
++    uint8_t *p_suffix = NULL;
++    uint16_t *p_prefix = NULL;
++
++    /* get initial key size and clear code, stop code */
++    f_gif_read(gif, &byte, 1);
++    key_size = (int) byte;
++    clear_code = 1 << key_size;
++    stop_code = clear_code + 1;
++    key = 0;
++
++    start = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++    discard_sub_blocks(gif);
++    end = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++    f_gif_seek(gif, start, LV_FS_SEEK_SET);
++
++    linesize = gif->width;
++    ptr_base = &gif->frame[gif->fy * linesize + gif->fx];
++    ptr_row_start = ptr_base;
++    ptr = ptr_row_start;
++    sub_len = shift = 0;
++    /* decoder */
++    pass = 0;
++    y = 0;
++    p_stack = gif->lzw_cache;
++    p_suffix = gif->lzw_cache + LZW_TABLE_SIZE;
++    p_prefix = (uint16_t*)(gif->lzw_cache + LZW_TABLE_SIZE * 2);
++    frm_off = 0;
++    frm_size = gif->fw * gif->fh;
++    curr_size = key_size + 1;
++    top_slot = 1 << curr_size;
++    new_codes = clear_code + 2;
++    slot = new_codes;
++    first_value = -1;
++    last_key = -1;
++    sp = p_stack;
++
++    while (frm_off < frm_size) {
++        /* copy data to frame buffer */
++        while (sp > p_stack) {
++            if(frm_off >= frm_size){
++                LV_LOG_WARN("LZW table token overflows the frame buffer");
++                return -1;
++            }
++            *ptr++ = *(--sp);
++            frm_off += 1;
++            /* read one line */
++            if ((ptr - ptr_row_start) == gif->fw) {
++                if (interlace) {
++                    switch(pass) {
++                    case 0:
++                    case 1:
++                        y += 8;
++                        ptr_row_start += linesize * 8;
++                        break;
++                    case 2:
++                        y += 4;
++                        ptr_row_start += linesize * 4;
++                        break;
++                    case 3:
++                        y += 2;
++                        ptr_row_start += linesize * 2;
++                        break;
++                    default:
++                        break;
++                    }
++                    while (y >= gif->fh) {
++                        y  = 4 >> pass;
++                        ptr_row_start = ptr_base + linesize * y;
++                        pass++;
++                    }
++                } else {
++                    ptr_row_start += linesize;
++                }
++                ptr = ptr_row_start;
++            }
++        }
++
++        key = get_key(gif, curr_size, &sub_len, &shift, &byte);
++
++        if (key == stop_code || key >= LZW_TABLE_SIZE)
++            break;
++
++        if (key == clear_code) {
++            curr_size = key_size + 1;
++            slot = new_codes;
++            top_slot = 1 << curr_size;
++            first_value = last_key = -1;
++            sp = p_stack;
++            continue;
++        }
++
++        curr_code = key;
++        /*
++         * If the current code is a code that will be added to the decoding
++         * dictionary, it is composed of the data list corresponding to the
++         * previous key and its first data.
++         * */
++        if (curr_code == slot && first_value >= 0) {
++            *sp++ = first_value;
++            curr_code = last_key;
++        }else if(curr_code >= slot)
++            break;
++
++        while (curr_code >= new_codes) {
++            *sp++ = p_suffix[curr_code];
++            curr_code = p_prefix[curr_code];
++        }
++        *sp++ = curr_code;
++
++        /* Add code to decoding dictionary */
++        if (slot < top_slot && last_key >= 0) {
++            p_suffix[slot] = curr_code;
++            p_prefix[slot++] = last_key;
++        }
++        first_value = curr_code;
++        last_key = key;
++        if (slot >= top_slot) {
++            if (curr_size < LZW_MAXBITS) {
++                top_slot <<= 1;
++                curr_size += 1;
++            }
++        }
++    }
++
++    if (key == stop_code) f_gif_read(gif, &sub_len, 1); /* Must be zero! */
++    f_gif_seek(gif, end, LV_FS_SEEK_SET);
++    return ret;
++}
++#else
++static Table *
++new_table(int key_size)
++{
++    int key;
++    int init_bulk = MAX(1 << (key_size + 1), 0x100);
++    Table * table = lv_malloc(sizeof(*table) + sizeof(Entry) * init_bulk);
++    if(table) {
++        table->bulk = init_bulk;
++        table->nentries = (1 << key_size) + 2;
++        table->entries = (Entry *) &table[1];
++        for(key = 0; key < (1 << key_size); key++)
++            table->entries[key] = (Entry) {
++            1, 0xFFF, key
++        };
++    }
++    return table;
++}
++
++/* Add table entry. Return value:
++ *  0 on success
++ *  +1 if key size must be incremented after this addition
++ *  -1 if could not realloc table */
++static int
++add_entry(Table ** tablep, uint16_t length, uint16_t prefix, uint8_t suffix)
++{
++    Table * table = *tablep;
++    if(table->nentries == table->bulk) {
++        table->bulk *= 2;
++        table = lv_realloc(table, sizeof(*table) + sizeof(Entry) * table->bulk);
++        if(!table) return -1;
++        table->entries = (Entry *) &table[1];
++        *tablep = table;
++    }
++    table->entries[table->nentries] = (Entry) {
++        length, prefix, suffix
++    };
++    table->nentries++;
++    if((table->nentries & (table->nentries - 1)) == 0)
++        return 1;
++    return 0;
++}
++
++/* Compute output index of y-th input line, in frame of height h. */
++static int
++interlaced_line_index(int h, int y)
++{
++    int p; /* number of lines in current pass */
++
++    p = (h - 1) / 8 + 1;
++    if(y < p)  /* pass 1 */
++        return y * 8;
++    y -= p;
++    p = (h - 5) / 8 + 1;
++    if(y < p)  /* pass 2 */
++        return y * 8 + 4;
++    y -= p;
++    p = (h - 3) / 4 + 1;
++    if(y < p)  /* pass 3 */
++        return y * 4 + 2;
++    y -= p;
++    /* pass 4 */
++    return y * 2 + 1;
++}
++
++/* Decompress image pixels.
++ * Return 0 on success or -1 on out-of-memory (w.r.t. LZW code table) or parse error. */
++static int
++read_image_data(gd_GIF * gif, int interlace)
++{
++    uint8_t sub_len, shift, byte;
++    int init_key_size, key_size, table_is_full = 0;
++    int frm_off, frm_size, str_len = 0, i, p, x, y;
++    uint16_t key, clear, stop;
++    int ret;
++    Table * table;
++    Entry entry = {0};
++    size_t start, end;
++
++    f_gif_read(gif, &byte, 1);
++    key_size = (int) byte;
++    start = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++    discard_sub_blocks(gif);
++    end = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
++    f_gif_seek(gif, start, LV_FS_SEEK_SET);
++    clear = 1 << key_size;
++    stop = clear + 1;
++    table = new_table(key_size);
++    key_size++;
++    init_key_size = key_size;
++    sub_len = shift = 0;
++    key = get_key(gif, key_size, &sub_len, &shift, &byte); /* clear code */
++    frm_off = 0;
++    ret = 0;
++    frm_size = gif->fw * gif->fh;
++    while(frm_off < frm_size) {
++        if(key == clear) {
++            key_size = init_key_size;
++            table->nentries = (1 << (key_size - 1)) + 2;
++            table_is_full = 0;
++        }
++        else if(!table_is_full) {
++            ret = add_entry(&table, str_len + 1, key, entry.suffix);
++            if(ret == -1) {
++                lv_free(table);
++                return -1;
++            }
++            if(table->nentries == 0x1000) {
++                ret = 0;
++                table_is_full = 1;
++            }
++        }
++        key = get_key(gif, key_size, &sub_len, &shift, &byte);
++        if(key == clear) continue;
++        if(key == stop || key == 0x1000) break;
++        if(ret == 1) key_size++;
++        entry = table->entries[key];
++        str_len = entry.length;
++	if(frm_off + str_len > frm_size){
++		LV_LOG_WARN("LZW table token overflows the frame buffer");
++		lv_free(table);
++		return -1;
++	}
++        for(i = 0; i < str_len; i++) {
++            p = frm_off + entry.length - 1;
++            x = p % gif->fw;
++            y = p / gif->fw;
++            if(interlace)
++                y = interlaced_line_index((int) gif->fh, y);
++            gif->frame[(gif->fy + y) * gif->width + gif->fx + x] = entry.suffix;
++            if(entry.prefix == 0xFFF)
++                break;
++            else
++                entry = table->entries[entry.prefix];
++        }
++        frm_off += str_len;
++        if(key < table->nentries - 1 && !table_is_full)
++            table->entries[table->nentries - 1].suffix = entry.suffix;
++    }
++    lv_free(table);
++    if(key == stop) f_gif_read(gif, &sub_len, 1);  /* Must be zero! */
++    f_gif_seek(gif, end, LV_FS_SEEK_SET);
++    return 0;
++}
++
++#endif
++
++/* Read image.
++ * Return 0 on success or -1 on out-of-memory (w.r.t. LZW code table) or parse error. */
++static int
++read_image(gd_GIF * gif)
++{
++    uint8_t fisrz;
++    int interlace;
++
++    /* Image Descriptor. */
++    gif->fx = read_num(gif);
++    gif->fy = read_num(gif);
++    gif->fw = read_num(gif);
++    gif->fh = read_num(gif);
++    if(gif->fx + (uint32_t)gif->fw > gif->width || gif->fy + (uint32_t)gif->fh > gif->height){
++        LV_LOG_WARN("Frame coordinates out of image bounds");
++        return -1;
++    }
++    f_gif_read(gif, &fisrz, 1);
++    interlace = fisrz & 0x40;
++    /* Ignore Sort Flag. */
++    /* Local Color Table? */
++    if(fisrz & 0x80) {
++        /* Read LCT */
++        gif->lct.size = 1 << ((fisrz & 0x07) + 1);
++        f_gif_read(gif, gif->lct.colors, 3 * gif->lct.size);
++        gif->palette = &gif->lct;
++    }
++    else
++        gif->palette = &gif->gct;
++    /* Image Data. */
++    return read_image_data(gif, interlace);
++}
++
++static void
++render_frame_rect(gd_GIF * gif, uint8_t * buffer)
++{
++    int i = gif->fy * gif->width + gif->fx;
++#ifdef GIFDEC_RENDER_FRAME
++    GIFDEC_RENDER_FRAME(&buffer[i * 4], gif->fw, gif->fh, gif->width,
++                        &gif->frame[i], gif->palette->colors,
++                        gif->gce.transparency ? gif->gce.tindex : 0x100);
++#else
++    int j, k;
++    uint8_t index, * color;
++
++    for(j = 0; j < gif->fh; j++) {
++        for(k = 0; k < gif->fw; k++) {
++            index = gif->frame[(gif->fy + j) * gif->width + gif->fx + k];
++            color = &gif->palette->colors[index * 3];
++            if(!gif->gce.transparency || index != gif->gce.tindex) {
++                buffer[(i + k) * 4 + 0] = *(color + 2);
++                buffer[(i + k) * 4 + 1] = *(color + 1);
++                buffer[(i + k) * 4 + 2] = *(color + 0);
++                buffer[(i + k) * 4 + 3] = 0xFF;
++            }
++        }
++        i += gif->width;
++    }
++#endif
++}
++
++static void
++dispose(gd_GIF * gif)
++{
++    int i;
++    uint8_t * bgcolor;
++    switch(gif->gce.disposal) {
++        case 2: /* Restore to background color. */
++            bgcolor = &gif->palette->colors[gif->bgindex * 3];
++
++            uint8_t opa = 0xff;
++            if(gif->gce.transparency) opa = 0x00;
++
++            i = gif->fy * gif->width + gif->fx;
++#ifdef GIFDEC_FILL_BG
++            GIFDEC_FILL_BG(&(gif->canvas[i * 4]), gif->fw, gif->fh, gif->width, bgcolor, opa);
++#else
++            int j, k;
++            for(j = 0; j < gif->fh; j++) {
++                for(k = 0; k < gif->fw; k++) {
++                    gif->canvas[(i + k) * 4 + 0] = *(bgcolor + 2);
++                    gif->canvas[(i + k) * 4 + 1] = *(bgcolor + 1);
++                    gif->canvas[(i + k) * 4 + 2] = *(bgcolor + 0);
++                    gif->canvas[(i + k) * 4 + 3] = opa;
++                }
++                i += gif->width;
++            }
++#endif
++            break;
++        case 3: /* Restore to previous, i.e., don't update canvas.*/
++            break;
++        default:
++            /* Add frame non-transparent pixels to canvas. */
++            render_frame_rect(gif, gif->canvas);
++    }
++}
++
++/* Return 1 if got a frame; 0 if got GIF trailer; -1 if error. */
++int
++gd_get_frame(gd_GIF * gif)
++{
++    char sep;
++
++    dispose(gif);
++    f_gif_read(gif, &sep, 1);
++    while(sep != ',') {
++        if(sep == ';') {
++            f_gif_seek(gif, gif->anim_start, LV_FS_SEEK_SET);
++            if(gif->loop_count == 1 || gif->loop_count < 0) {
++                return 0;
++            }
++            else if(gif->loop_count > 1) {
++                gif->loop_count--;
++            }
++        }
++        else if(sep == '!')
++            read_ext(gif);
++        else return -1;
++        f_gif_read(gif, &sep, 1);
++    }
++    if(read_image(gif) == -1)
++        return -1;
++    return 1;
++}
++
++void
++gd_render_frame(gd_GIF * gif, uint8_t * buffer)
++{
++    render_frame_rect(gif, buffer);
++}
++
++void
++gd_rewind(gd_GIF * gif)
++{
++    gif->loop_count = -1;
++    f_gif_seek(gif, gif->anim_start, LV_FS_SEEK_SET);
++}
++
++void
++gd_close_gif(gd_GIF * gif)
++{
++    f_gif_close(gif);
++    lv_free(gif);
++}
++
++static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file)
++{
++    gif->f_rw_p = 0;
++    gif->data = NULL;
++    gif->is_file = is_file;
++
++    if(is_file) {
++        lv_fs_res_t res = lv_fs_open(&gif->fd, path, LV_FS_MODE_RD);
++        if(res != LV_FS_RES_OK) return false;
++        else return true;
++    }
++    else {
++        gif->data = path;
++        return true;
++    }
++}
++
++static void f_gif_read(gd_GIF * gif, void * buf, size_t len)
++{
++    if(gif->is_file) {
++        lv_fs_read(&gif->fd, buf, len, NULL);
++    }
++    else {
++        memcpy(buf, &gif->data[gif->f_rw_p], len);
++        gif->f_rw_p += len;
++    }
++}
++
++static int f_gif_seek(gd_GIF * gif, size_t pos, int k)
++{
++    if(gif->is_file) {
++        lv_fs_seek(&gif->fd, pos, k);
++        uint32_t x;
++        lv_fs_tell(&gif->fd, &x);
++        return x;
++    }
++    else {
++        if(k == LV_FS_SEEK_CUR) gif->f_rw_p += pos;
++        else if(k == LV_FS_SEEK_SET) gif->f_rw_p = pos;
++        return gif->f_rw_p;
++    }
++}
++
++static void f_gif_close(gd_GIF * gif)
++{
++    if(gif->is_file) {
++        lv_fs_close(&gif->fd);
++    }
++}
++
+diff --git a/main/display/lvgl_display/gif/gifdec.h b/main/display/lvgl_display/gif/gifdec.h
+new file mode 100644
+index 0000000..12c171e
+--- /dev/null
++++ b/main/display/lvgl_display/gif/gifdec.h
+@@ -0,0 +1,68 @@
++#ifndef GIFDEC_H
++#define GIFDEC_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <lvgl.h>
++
++#include <stdint.h>
++
++typedef struct _gd_Palette {
++    int size;
++    uint8_t colors[0x100 * 3];
++} gd_Palette;
++
++typedef struct _gd_GCE {
++    uint16_t delay;
++    uint8_t tindex;
++    uint8_t disposal;
++    int input;
++    int transparency;
++} gd_GCE;
++
++
++
++typedef struct _gd_GIF {
++    lv_fs_file_t fd;
++    const char * data;
++    uint8_t is_file;
++    uint32_t f_rw_p;
++    int32_t anim_start;
++    uint16_t width, height;
++    uint16_t depth;
++    int32_t loop_count;
++    gd_GCE gce;
++    gd_Palette * palette;
++    gd_Palette lct, gct;
++    void (*plain_text)(
++        struct _gd_GIF * gif, uint16_t tx, uint16_t ty,
++        uint16_t tw, uint16_t th, uint8_t cw, uint8_t ch,
++        uint8_t fg, uint8_t bg
++    );
++    void (*comment)(struct _gd_GIF * gif);
++    void (*application)(struct _gd_GIF * gif, char id[8], char auth[3]);
++    uint16_t fx, fy, fw, fh;
++    uint8_t bgindex;
++    uint8_t * canvas, * frame;
++#if LV_GIF_CACHE_DECODE_DATA
++    uint8_t *lzw_cache;
++#endif
++} gd_GIF;
++
++gd_GIF * gd_open_gif_file(const char * fname);
++
++gd_GIF * gd_open_gif_data(const void * data);
++
++void gd_render_frame(gd_GIF * gif, uint8_t * buffer);
++
++int gd_get_frame(gd_GIF * gif);
++void gd_rewind(gd_GIF * gif);
++void gd_close_gif(gd_GIF * gif);
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
++
++#endif /* GIFDEC_H */
+diff --git a/main/display/lvgl_display/gif/gifdec_mve.h b/main/display/lvgl_display/gif/gifdec_mve.h
+new file mode 100644
+index 0000000..6d83393
+--- /dev/null
++++ b/main/display/lvgl_display/gif/gifdec_mve.h
+@@ -0,0 +1,140 @@
++/**
++ * @file gifdec_mve.h
++ *
++ */
++
++#ifndef GIFDEC_MVE_H
++#define GIFDEC_MVE_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*********************
++ *      INCLUDES
++ *********************/
++#include <stdint.h>
++#include "../../misc/lv_color.h"
++
++/*********************
++ *      DEFINES
++ *********************/
++
++#define GIFDEC_FILL_BG(dst, w, h, stride, color, opa) \
++    _gifdec_fill_bg_mve(dst, w, h, stride, color, opa)
++
++#define GIFDEC_RENDER_FRAME(dst, w, h, stride, frame, pattern, tindex) \
++    _gifdec_render_frame_mve(dst, w, h, stride, frame, pattern, tindex)
++
++/**********************
++ *      MACROS
++ **********************/
++
++/**********************
++ *      TYPEDEFS
++ **********************/
++
++/**********************
++ * GLOBAL PROTOTYPES
++ **********************/
++
++static inline void _gifdec_fill_bg_mve(uint8_t * dst, uint16_t w, uint16_t h, uint16_t stride, uint8_t * color,
++                                       uint8_t opa)
++{
++    lv_color32_t c = lv_color32_make(*(color + 0), *(color + 1), *(color + 2), opa);
++    uint32_t color_32 = *(uint32_t *)&c;
++
++    __asm volatile(
++        ".p2align 2                                             \n"
++        "vdup.32             q0, %[src]                         \n"
++        "3:                                                     \n"
++        "mov                 r0, %[dst]                         \n"
++
++        "wlstp.32            lr, %[w], 1f                       \n"
++        "2:                                                     \n"
++
++        "vstrw.32            q0, [r0], #16                      \n"
++        "letp                lr, 2b                             \n"
++        "1:                                                     \n"
++        "add                 %[dst], %[iTargetStride]           \n"
++        "subs                %[h], #1                           \n"
++        "bne                 3b                                 \n"
++        : [dst] "+r"(dst),
++        [h] "+r"(h)
++        : [src] "r"(color_32),
++        [w] "r"(w),
++        [iTargetStride] "r"(stride * sizeof(uint32_t))
++        : "r0", "q0", "memory", "r14", "cc");
++}
++
++static inline void _gifdec_render_frame_mve(uint8_t * dst, uint16_t w, uint16_t h, uint16_t stride, uint8_t * frame,
++                                            uint8_t * pattern, uint16_t tindex)
++{
++    if(w == 0 || h == 0) {
++        return;
++    }
++
++    __asm volatile(
++        "vmov.u16       q3, #255                                \n"
++        "vshl.u16       q3, q3, #8                              \n" /* left shift 8 for a*/
++
++        "mov            r0, #2                                  \n"
++        "vidup.u16      q6, r0, #4                              \n" /* [2, 6, 10, 14, 18, 22, 26, 30] */
++        "mov            r0, #0                                  \n"
++        "vidup.u16      q7, r0, #4                              \n" /* [0, 4, 8, 12, 16, 20, 24, 28] */
++
++        "3:                                                     \n"
++        "mov            r1, %[dst]                              \n"
++        "mov            r2, %[frame]                            \n"
++
++        "wlstp.16       lr, %[w], 1f                            \n"
++        "2:                                                     \n"
++
++        "mov            r0, #3                                  \n"
++        "vldrb.u16      q4, [r2], #8                            \n"
++        "vmul.u16       q5, q4, r0                              \n"
++
++        "mov            r0, #1                                  \n"
++        "vldrb.u16      q2, [%[pattern], q5]                    \n" /* load 8 pixel r*/
++
++        "vadd.u16       q5, q5, r0                              \n"
++        "vldrb.u16      q1, [%[pattern], q5]                    \n" /* load 8 pixel g*/
++
++        "vadd.u16       q5, q5, r0                              \n"
++        "vldrb.u16      q0, [%[pattern], q5]                    \n" /* load 8 pixel b*/
++
++        "vshl.u16       q1, q1, #8                              \n" /* left shift 8 for g*/
++
++        "vorr.u16       q0, q0, q1                              \n" /* make 8 pixel gb*/
++        "vorr.u16       q1, q2, q3                              \n" /* make 8 pixel ar*/
++
++        "vcmp.i16       ne, q4, %[tindex]                       \n"
++        "vpstt                                                  \n"
++        "vstrht.16      q0, [r1, q7]                            \n"
++        "vstrht.16      q1, [r1, q6]                            \n"
++        "add            r1, r1, #32                             \n"
++
++        "letp           lr, 2b                                  \n"
++
++        "1:                                                     \n"
++        "mov            r0, %[stride], LSL #2                   \n"
++        "add            %[dst], r0                              \n"
++        "add            %[frame], %[stride]                     \n"
++        "subs           %[h], #1                                \n"
++        "bne            3b                                      \n"
++
++        : [dst] "+r"(dst),
++        [frame] "+r"(frame),
++        [h] "+r"(h)
++        : [pattern] "r"(pattern),
++        [w] "r"(w),
++        [stride] "r"(stride),
++        [tindex] "r"(tindex)
++        : "r0", "r1", "r2", "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "memory", "r14", "cc");
++}
++
++#ifdef __cplusplus
++} /*extern "C"*/
++#endif
++
++#endif /*GIFDEC_MVE_H*/
+diff --git a/main/display/lvgl_display/gif/lvgl_gif.cc b/main/display/lvgl_display/gif/lvgl_gif.cc
+new file mode 100644
+index 0000000..de94803
+--- /dev/null
++++ b/main/display/lvgl_display/gif/lvgl_gif.cc
+@@ -0,0 +1,207 @@
++#include "lvgl_gif.h"
++#include <esp_log.h>
++#include <cstring>
++
++#define TAG "LvglGif"
++
++LvglGif::LvglGif(const lv_img_dsc_t* img_dsc)
++    : gif_(nullptr), timer_(nullptr), last_call_(0), playing_(false), loaded_(false) {
++    if (!img_dsc || !img_dsc->data) {
++        ESP_LOGE(TAG, "Invalid image descriptor");
++        return;
++    }
++
++    gif_ = gd_open_gif_data(img_dsc->data);
++    if (!gif_) {
++        ESP_LOGE(TAG, "Failed to open GIF from image descriptor");
++    }
++
++    // Setup LVGL image descriptor
++    memset(&img_dsc_, 0, sizeof(img_dsc_));
++    img_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
++    img_dsc_.header.flags = LV_IMAGE_FLAGS_MODIFIABLE;
++    img_dsc_.header.cf = LV_COLOR_FORMAT_ARGB8888;
++    img_dsc_.header.w = gif_->width;
++    img_dsc_.header.h = gif_->height;
++    img_dsc_.header.stride = gif_->width * 4;
++    img_dsc_.data = gif_->canvas;
++    img_dsc_.data_size = gif_->width * gif_->height * 4;
++
++    // Render first frame
++    if (gif_->canvas) {
++        gd_render_frame(gif_, gif_->canvas);
++    }
++
++    loaded_ = true;
++    ESP_LOGI(TAG, "GIF loaded from image descriptor: %dx%d", gif_->width, gif_->height);
++}
++
++// Destructor
++LvglGif::~LvglGif() {
++    Cleanup();
++}
++
++// LvglImage interface implementation
++const lv_img_dsc_t* LvglGif::image_dsc() const {
++    if (!loaded_) {
++        return nullptr;
++    }
++    return &img_dsc_;
++}
++
++// Animation control methods
++void LvglGif::Start() {
++    if (!loaded_ || !gif_) {
++        ESP_LOGW(TAG, "GIF not loaded, cannot start");
++        return;
++    }
++
++    if (!timer_) {
++        timer_ = lv_timer_create([](lv_timer_t* timer) {
++            LvglGif* gif_obj = static_cast<LvglGif*>(lv_timer_get_user_data(timer));
++            gif_obj->NextFrame();
++        }, 10, this);
++    }
++
++    if (timer_) {
++        playing_ = true;
++        last_call_ = lv_tick_get();
++        lv_timer_resume(timer_);
++        lv_timer_reset(timer_);
++        
++        // Render first frame
++        NextFrame();
++        
++        ESP_LOGI(TAG, "GIF animation started");
++    }
++}
++
++void LvglGif::Pause() {
++    if (timer_) {
++        playing_ = false;
++        lv_timer_pause(timer_);
++        ESP_LOGI(TAG, "GIF animation paused");
++    }
++}
++
++void LvglGif::Resume() {
++    if (!loaded_ || !gif_) {
++        ESP_LOGW(TAG, "GIF not loaded, cannot resume");
++        return;
++    }
++
++    if (timer_) {
++        playing_ = true;
++        lv_timer_resume(timer_);
++        ESP_LOGI(TAG, "GIF animation resumed");
++    }
++}
++
++void LvglGif::Stop() {
++    if (timer_) {
++        playing_ = false;
++        lv_timer_pause(timer_);
++    }
++
++    if (gif_) {
++        gd_rewind(gif_);
++        NextFrame();
++        ESP_LOGI(TAG, "GIF animation stopped and rewound");
++    }
++}
++
++bool LvglGif::IsPlaying() const {
++    return playing_;
++}
++
++bool LvglGif::IsLoaded() const {
++    return loaded_;
++}
++
++int32_t LvglGif::GetLoopCount() const {
++    if (!loaded_ || !gif_) {
++        return -1;
++    }
++    return gif_->loop_count;
++}
++
++void LvglGif::SetLoopCount(int32_t count) {
++    if (!loaded_ || !gif_) {
++        ESP_LOGW(TAG, "GIF not loaded, cannot set loop count");
++        return;
++    }
++    gif_->loop_count = count;
++}
++
++uint16_t LvglGif::width() const {
++    if (!loaded_ || !gif_) {
++        return 0;
++    }
++    return gif_->width;
++}
++
++uint16_t LvglGif::height() const {
++    if (!loaded_ || !gif_) {
++        return 0;
++    }
++    return gif_->height;
++}
++
++void LvglGif::SetFrameCallback(std::function<void()> callback) {
++    frame_callback_ = callback;
++}
++
++void LvglGif::NextFrame() {
++    if (!loaded_ || !gif_ || !playing_) {
++        return;
++    }
++
++    // Check if enough time has passed for the next frame
++    uint32_t elapsed = lv_tick_elaps(last_call_);
++    if (elapsed < gif_->gce.delay * 10) {
++        return;
++    }
++
++    last_call_ = lv_tick_get();
++
++    // Get next frame
++    int has_next = gd_get_frame(gif_);
++    if (has_next == 0) {
++        // Animation finished, pause timer
++        playing_ = false;
++        if (timer_) {
++            lv_timer_pause(timer_);
++        }
++        ESP_LOGI(TAG, "GIF animation completed");
++    }
++
++    // Render current frame
++    if (gif_->canvas) {
++        gd_render_frame(gif_, gif_->canvas);
++        
++        // Call frame callback if set
++        if (frame_callback_) {
++            frame_callback_();
++        }
++    }
++}
++
++void LvglGif::Cleanup() {
++    // Stop and delete timer
++    if (timer_) {
++        lv_timer_delete(timer_);
++        timer_ = nullptr;
++    }
++
++    // Close GIF decoder
++    if (gif_) {
++        gd_close_gif(gif_);
++        gif_ = nullptr;
++    }
++
++    playing_ = false;
++    loaded_ = false;
++    
++    // Clear image descriptor
++    memset(&img_dsc_, 0, sizeof(img_dsc_));
++}
+diff --git a/main/display/lvgl_display/gif/lvgl_gif.h b/main/display/lvgl_display/gif/lvgl_gif.h
+new file mode 100644
+index 0000000..afa2959
+--- /dev/null
++++ b/main/display/lvgl_display/gif/lvgl_gif.h
+@@ -0,0 +1,101 @@
++#pragma once
++
++#include "../lvgl_image.h"
++#include "gifdec.h"
++#include <lvgl.h>
++#include <memory>
++#include <functional>
++
++/**
++ * C++ implementation of LVGL GIF widget
++ * Provides GIF animation functionality using gifdec library
++ */
++class LvglGif {
++public:
++    explicit LvglGif(const lv_img_dsc_t* img_dsc);
++    virtual ~LvglGif();
++
++    // LvglImage interface implementation
++    virtual const lv_img_dsc_t* image_dsc() const;
++
++    /**
++     * Start/restart GIF animation
++     */
++    void Start();
++
++    /**
++     * Pause GIF animation
++     */
++    void Pause();
++
++    /**
++     * Resume GIF animation
++     */
++    void Resume();
++
++    /**
++     * Stop GIF animation and rewind to first frame
++     */
++    void Stop();
++
++    /**
++     * Check if GIF is currently playing
++     */
++    bool IsPlaying() const;
++
++    /**
++     * Check if GIF was loaded successfully
++     */
++    bool IsLoaded() const;
++
++    /**
++     * Get loop count
++     */
++    int32_t GetLoopCount() const;
++
++    /**
++     * Set loop count
++     */
++    void SetLoopCount(int32_t count);
++
++    /**
++     * Get GIF dimensions
++     */
++    uint16_t width() const;
++    uint16_t height() const;
++
++    /**
++     * Set frame update callback
++     */
++    void SetFrameCallback(std::function<void()> callback);
++
++private:
++    // GIF decoder instance
++    gd_GIF* gif_;
++    
++    // LVGL image descriptor
++    lv_img_dsc_t img_dsc_;
++    
++    // Animation timer
++    lv_timer_t* timer_;
++    
++    // Last frame update time
++    uint32_t last_call_;
++    
++    // Animation state
++    bool playing_;
++    bool loaded_;
++    
++    // Frame update callback
++    std::function<void()> frame_callback_;
++    
++    /**
++     * Update to next frame
++     */
++    void NextFrame();
++    
++    /**
++     * Cleanup resources
++     */
++    void Cleanup();
++};
+diff --git a/main/display/lvgl_display/lvgl_display.cc b/main/display/lvgl_display/lvgl_display.cc
+index 27aad31..ffced5b 100644
+--- a/main/display/lvgl_display/lvgl_display.cc
++++ b/main/display/lvgl_display/lvgl_display.cc
+@@ -60,9 +60,6 @@ LvglDisplay::~LvglDisplay() {
+     if (battery_label_ != nullptr) {
+         lv_obj_del(battery_label_);
+     }
+-    if (emotion_label_ != nullptr) {
+-        lv_obj_del(emotion_label_);
+-    }
+     if( low_battery_popup_ != nullptr ) {
+         lv_obj_del(low_battery_popup_);
+     }
+@@ -204,20 +201,6 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+     esp_pm_lock_release(pm_lock_);
+ }
+ 
+-
+-void LvglDisplay::SetEmotion(const char* emotion) {
+-    const char* utf8 = font_awesome_get_utf8(emotion);
+-    DisplayLockGuard lock(this);
+-    if (emotion_label_ == nullptr) {
+-        return;
+-    }
+-    if (utf8 != nullptr) {
+-        lv_label_set_text(emotion_label_, utf8);
+-    } else {
+-        lv_label_set_text(emotion_label_, FONT_AWESOME_NEUTRAL);
+-    }
+-}
+-
+ void LvglDisplay::SetPreviewImage(const lv_img_dsc_t* image) {
+     // Do nothing but free the image
+     if (image != nullptr) {
+@@ -226,20 +209,6 @@ void LvglDisplay::SetPreviewImage(const lv_img_dsc_t* image) {
+     }
+ }
+ 
+-void LvglDisplay::SetChatMessage(const char* role, const char* content) {
+-    DisplayLockGuard lock(this);
+-    if (chat_message_label_ == nullptr) {
+-        return;
+-    }
+-    lv_label_set_text(chat_message_label_, content);
+-}
+-
+-void LvglDisplay::SetTheme(Theme* theme) {
+-    current_theme_ = theme;
+-    Settings settings("display", true);
+-    settings.SetString("theme", theme->name());
+-}
+-
+ void LvglDisplay::SetPowerSaveMode(bool on) {
+     if (on) {
+         SetChatMessage("system", "");
+diff --git a/main/display/lvgl_display/lvgl_display.h b/main/display/lvgl_display/lvgl_display.h
+index 24cc935..47d2e84 100644
+--- a/main/display/lvgl_display/lvgl_display.h
++++ b/main/display/lvgl_display/lvgl_display.h
+@@ -19,11 +19,7 @@ public:
+     virtual void SetStatus(const char* status);
+     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
+     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+-    virtual void SetEmotion(const char* emotion);
+-    virtual void SetChatMessage(const char* role, const char* content);
+     virtual void SetPreviewImage(const lv_img_dsc_t* image);
+-    virtual void SetTheme(Theme* theme);
+-    virtual Theme* GetTheme() { return current_theme_; }
+     virtual void UpdateStatusBar(bool update_all = false);
+     virtual void SetPowerSaveMode(bool on);
+ 
+@@ -31,13 +27,11 @@ protected:
+     esp_pm_lock_handle_t pm_lock_ = nullptr;
+     lv_display_t *display_ = nullptr;
+ 
+-    lv_obj_t *emotion_label_ = nullptr;
+     lv_obj_t *network_label_ = nullptr;
+     lv_obj_t *status_label_ = nullptr;
+     lv_obj_t *notification_label_ = nullptr;
+     lv_obj_t *mute_label_ = nullptr;
+     lv_obj_t *battery_label_ = nullptr;
+-    lv_obj_t* chat_message_label_ = nullptr;
+     lv_obj_t* low_battery_popup_ = nullptr;
+     lv_obj_t* low_battery_label_ = nullptr;
+     
+diff --git a/main/display/lvgl_display/lvgl_image.cc b/main/display/lvgl_display/lvgl_image.cc
+index 015393b..eff91a1 100644
+--- a/main/display/lvgl_display/lvgl_image.cc
++++ b/main/display/lvgl_display/lvgl_image.cc
+@@ -17,6 +17,11 @@ LvglRawImage::LvglRawImage(void* data, size_t size) {
+     image_dsc_.data = static_cast<uint8_t*>(data);
+ }
+ 
++bool LvglRawImage::IsGif() const {
++    auto ptr = (const uint8_t*)image_dsc_.data;
++    return ptr[0] == 'G' && ptr[1] == 'I' && ptr[2] == 'F';
++}
++
+ LvglCBinImage::LvglCBinImage(void* data) {
+     image_dsc_ = cbin_img_dsc_create(static_cast<uint8_t*>(data));
+ }
+@@ -25,4 +30,4 @@ LvglCBinImage::~LvglCBinImage() {
+     if (image_dsc_ != nullptr) {
+         cbin_img_dsc_delete(image_dsc_);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/main/display/lvgl_display/lvgl_image.h b/main/display/lvgl_display/lvgl_image.h
+index ee6ba0b..92f3490 100644
+--- a/main/display/lvgl_display/lvgl_image.h
++++ b/main/display/lvgl_display/lvgl_image.h
+@@ -7,6 +7,7 @@
+ class LvglImage {
+ public:
+     virtual const lv_img_dsc_t* image_dsc() const = 0;
++    virtual bool IsGif() const { return false; }
+     virtual ~LvglImage() = default;
+ };
+ 
+@@ -15,12 +16,12 @@ class LvglRawImage : public LvglImage {
+ public:
+     LvglRawImage(void* data, size_t size);
+     virtual const lv_img_dsc_t* image_dsc() const override { return &image_dsc_; }
++    virtual bool IsGif() const;
+ 
+ private:
+     lv_img_dsc_t image_dsc_;
+ };
+ 
+-
+ class LvglCBinImage : public LvglImage {
+ public:
+     LvglCBinImage(void* data);
+@@ -29,4 +30,13 @@ public:
+ 
+ private:
+     lv_img_dsc_t* image_dsc_ = nullptr;
++};
++
++class LvglSourceImage : public LvglImage {
++public:
++    LvglSourceImage(const lv_img_dsc_t* image_dsc) : image_dsc_(image_dsc) {}
++    virtual const lv_img_dsc_t* image_dsc() const override { return image_dsc_; }
++
++private:
++    const lv_img_dsc_t* image_dsc_;
+ };
+\ No newline at end of file
+diff --git a/main/display/lvgl_display/lvgl_theme.cc b/main/display/lvgl_display/lvgl_theme.cc
+index f7512d8..f1bdffe 100644
+--- a/main/display/lvgl_display/lvgl_theme.cc
++++ b/main/display/lvgl_display/lvgl_theme.cc
+@@ -3,6 +3,17 @@
+ LvglTheme::LvglTheme(const std::string& name) : Theme(name) {
+ }
+ 
++lv_color_t LvglTheme::ParseColor(const std::string& color) {
++    if (color.find("#") == 0) {
++        // Convert #112233 to lv_color_t
++        uint8_t r = strtol(color.substr(1, 2).c_str(), nullptr, 16);
++        uint8_t g = strtol(color.substr(3, 2).c_str(), nullptr, 16);
++        uint8_t b = strtol(color.substr(5, 2).c_str(), nullptr, 16);
++        return lv_color_make(r, g, b);
++    }
++    return lv_color_black();
++}
++
+ LvglThemeManager::LvglThemeManager() {
+ }
+ 
+diff --git a/main/display/lvgl_display/lvgl_theme.h b/main/display/lvgl_display/lvgl_theme.h
+index 0d466ad..85527a9 100644
+--- a/main/display/lvgl_display/lvgl_theme.h
++++ b/main/display/lvgl_display/lvgl_theme.h
+@@ -13,6 +13,8 @@
+ 
+ class LvglTheme : public Theme {
+ public:
++    static lv_color_t ParseColor(const std::string& color);
++
+     LvglTheme(const std::string& name);
+ 
+     // Properties
+diff --git a/main/display/oled_display.cc b/main/display/oled_display.cc
+index c1fe186..622043c 100644
+--- a/main/display/oled_display.cc
++++ b/main/display/oled_display.cc
+@@ -311,3 +311,15 @@ void OledDisplay::SetupUI_128x32() {
+     lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000), LV_PART_MAIN);
+ }
+ 
++void OledDisplay::SetEmotion(const char* emotion) {
++    const char* utf8 = font_awesome_get_utf8(emotion);
++    DisplayLockGuard lock(this);
++    if (emotion_label_ == nullptr) {
++        return;
++    }
++    if (utf8 != nullptr) {
++        lv_label_set_text(emotion_label_, utf8);
++    } else {
++        lv_label_set_text(emotion_label_, FONT_AWESOME_NEUTRAL);
++    }
++}
+diff --git a/main/display/oled_display.h b/main/display/oled_display.h
+index 2b5b21f..c5013df 100644
+--- a/main/display/oled_display.h
++++ b/main/display/oled_display.h
+@@ -18,6 +18,8 @@ private:
+     lv_obj_t* content_right_ = nullptr;
+     lv_obj_t* container_ = nullptr;
+     lv_obj_t* side_bar_ = nullptr;
++    lv_obj_t *emotion_label_ = nullptr;
++    lv_obj_t* chat_message_label_ = nullptr;
+     const lv_font_t* text_font_ = nullptr;
+     const lv_font_t* icon_font_ = nullptr;
+ 
+@@ -32,6 +34,7 @@ public:
+     ~OledDisplay();
+ 
+     virtual void SetChatMessage(const char* role, const char* content) override;
++    virtual void SetEmotion(const char* emotion) override;
+ };
+ 
+ #endif // OLED_DISPLAY_H
+diff --git a/main/mcp_server.cc b/main/mcp_server.cc
+index 5cdfc1d..b779711 100644
+--- a/main/mcp_server.cc
++++ b/main/mcp_server.cc
+@@ -15,6 +15,7 @@
+ #include "board.h"
+ #include "settings.h"
+ #include "lvgl_theme.h"
++#include "lvgl_display.h"
+ 
+ #define TAG "MCP"
+ 
+@@ -77,6 +78,7 @@ void McpServer::AddCommonTools() {
+             });
+     }
+ 
++#ifdef HAVE_LVGL
+     auto display = board.GetDisplay();
+     if (display && display->GetTheme() != nullptr) {
+         AddTool("self.screen.set_theme",
+@@ -115,6 +117,7 @@ void McpServer::AddCommonTools() {
+                 return camera->Explain(question);
+             });
+     }
++#endif
+ 
+     // Restore the original tools list to the end of the tools list
+     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
+@@ -143,7 +146,8 @@ void McpServer::AddUserOnlyTools() {
+         });
+ 
+     // Display control
+-    auto display = Board::GetInstance().GetDisplay();
++#ifdef HAVE_LVGL
++    auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+     if (display) {
+         AddUserOnlyTool("self.screen.get_info", "Information about the screen, including width, height, etc.",
+             PropertyList(),
+@@ -199,6 +203,7 @@ void McpServer::AddUserOnlyTools() {
+                 return true;
+             });
+     }
++#endif
+ 
+     // Assets download url
+     auto assets = Board::GetInstance().GetAssets();
+diff --git a/sdkconfig.defaults b/sdkconfig.defaults
+index cb3b8b7..5c99235 100644
+--- a/sdkconfig.defaults
++++ b/sdkconfig.defaults
+@@ -1,6 +1,7 @@
+ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+ CONFIG_COMPILER_CXX_EXCEPTIONS=y
+ CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=1024
++CONFIG_COMPILER_CXX_RTTI=y
+ 
+ CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF=y
+ CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y

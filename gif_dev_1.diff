@@ -1,0 +1,2356 @@
+commit 4048647ef8418ed56c42e79c33f5445fdd029b87
+Author: Xiaoxia <terrence@tenclass.com>
+Date:   Wed Sep 10 18:43:47 2025 +0800
+
+    feat: Add lvgl display theme control (#1180)
+    
+    * feat: Add lvgl display theme control
+    
+    * fix: compiling errors
+    
+    * move light/dark themes to lcd display
+    
+    * fix compile errors
+    
+    ---------
+    
+    Co-authored-by: Xiaoxia <terrence.huang@tenclass.com>
+
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 6f85009..f0bfa95 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -50,7 +50,11 @@ set(SOURCES "audio/audio_codec.cc"
+             "display/display.cc"
+             "display/lcd_display.cc"
+             "display/oled_display.cc"
+-            "display/emoji_collection.cc"
++            "display/lvgl_display/lvgl_display.cc"
++            "display/lvgl_display/emoji_collection.cc"
++            "display/lvgl_display/lvgl_theme.cc"
++            "display/lvgl_display/lvgl_font.cc"
++            "display/lvgl_display/lvgl_image.cc"
+             "protocols/protocol.cc"
+             "protocols/mqtt_protocol.cc"
+             "protocols/websocket_protocol.cc"
+@@ -64,7 +68,7 @@ set(SOURCES "audio/audio_codec.cc"
+             "main.cc"
+             )
+ 
+-set(INCLUDE_DIRS "." "display" "audio" "protocols")
++set(INCLUDE_DIRS "." "display" "display/lvgl_display" "audio" "protocols")
+ 
+ # Add board common files
+ file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
+diff --git a/main/assets.cc b/main/assets.cc
+index 2626875..c7cc815 100644
+--- a/main/assets.cc
++++ b/main/assets.cc
+@@ -2,6 +2,7 @@
+ #include "board.h"
+ #include "display.h"
+ #include "application.h"
++#include "lvgl_theme.h"
+ 
+ #include <esp_log.h>
+ #include <spi_flash_mmap.h>
+@@ -32,12 +33,6 @@ Assets::Assets(std::string default_assets_url) {
+ }
+ 
+ Assets::~Assets() {
+-    if (custom_emoji_collection_ != nullptr) {
+-        delete custom_emoji_collection_;
+-    }
+-    if (text_font_) {
+-        cbin_font_delete(text_font_);
+-    }
+     if (mmap_handle_ != 0) {
+         esp_partition_munmap(mmap_handle_);
+     }
+@@ -111,6 +106,17 @@ bool Assets::InitializePartition() {
+     return checksum_valid_;
+ }
+ 
++lv_color_t Assets::ParseColor(const std::string& color) {
++    if (color.find("#") == 0) {
++        // Convert #112233 to lv_color_t
++        uint8_t r = strtol(color.substr(1, 2).c_str(), nullptr, 16);
++        uint8_t g = strtol(color.substr(3, 2).c_str(), nullptr, 16);
++        uint8_t b = strtol(color.substr(5, 2).c_str(), nullptr, 16);
++        return lv_color_make(r, g, b);
++    }
++    return lv_color_black();
++}
++
+ bool Assets::Apply() {
+     void* ptr = nullptr;
+     size_t size = 0;
+@@ -123,6 +129,14 @@ bool Assets::Apply() {
+         ESP_LOGE(TAG, "The index.json file is not valid");
+         return false;
+     }
++
++    cJSON* version = cJSON_GetObjectItem(root, "version");
++    if (cJSON_IsNumber(version)) {
++        if (version->valuedouble > 1) {
++            ESP_LOGE(TAG, "The assets version %d is not supported, please upgrade the firmware", version->valueint);
++            return false;
++        }
++    }
+     
+     cJSON* srmodels = cJSON_GetObjectItem(root, "srmodels");
+     if (cJSON_IsString(srmodels)) {
+@@ -144,17 +158,21 @@ bool Assets::Apply() {
+         }
+     }
+ 
++    auto& theme_manager = LvglThemeManager::GetInstance();
++    auto light_theme = theme_manager.GetTheme("light");
++    auto dark_theme = theme_manager.GetTheme("dark");
++
+     cJSON* font = cJSON_GetObjectItem(root, "text_font");
+     if (cJSON_IsString(font)) {
+         std::string fonts_text_file = font->valuestring;
+         if (GetAssetData(fonts_text_file, ptr, size)) {
+-            if (text_font_ != nullptr) {
+-                cbin_font_delete(text_font_);
+-            }
+-            text_font_ = cbin_font_create(static_cast<uint8_t*>(ptr));
+-            if (text_font_ == nullptr) {
++            auto text_font = std::make_shared<LvglCBinFont>(ptr);
++            if (text_font->font() == nullptr) {
+                 ESP_LOGE(TAG, "Failed to load fonts.bin");
++                return false;
+             }
++            light_theme->set_text_font(text_font);
++            dark_theme->set_text_font(text_font);
+         } else {
+             ESP_LOGE(TAG, "The font file %s is not found", fonts_text_file.c_str());
+         }
+@@ -162,10 +180,7 @@ bool Assets::Apply() {
+ 
+     cJSON* emoji_collection = cJSON_GetObjectItem(root, "emoji_collection");
+     if (cJSON_IsArray(emoji_collection)) {
+-        if (custom_emoji_collection_ != nullptr) {
+-            delete custom_emoji_collection_;
+-        }
+-        custom_emoji_collection_ = new CustomEmojiCollection();
++        auto custom_emoji_collection = std::make_shared<CustomEmojiCollection>();
+         int emoji_count = cJSON_GetArraySize(emoji_collection);
+         for (int i = 0; i < emoji_count; i++) {
+             cJSON* emoji = cJSON_GetArrayItem(emoji_collection, i);
+@@ -177,28 +192,63 @@ bool Assets::Apply() {
+                         ESP_LOGE(TAG, "Emoji %s image file %s is not found", name->valuestring, file->valuestring);
+                         continue;
+                     }
+-                    auto img = new lv_img_dsc_t {
+-                        .header = {
+-                            .magic = LV_IMAGE_HEADER_MAGIC,
+-                            .cf = LV_COLOR_FORMAT_RAW_ALPHA,
+-                        },
+-                        .data_size = size,
+-                        .data = static_cast<uint8_t*>(ptr),
+-                    };
+-                    custom_emoji_collection_->AddEmoji(name->valuestring, img);
++                    custom_emoji_collection->AddEmoji(name->valuestring, new LvglRawImage(ptr, size));
+                 }
+             }
+         }
++        light_theme->set_emoji_collection(custom_emoji_collection);
++        dark_theme->set_emoji_collection(custom_emoji_collection);
++    }
++
++    cJSON* skin = cJSON_GetObjectItem(root, "skin");
++    if (cJSON_IsObject(skin)) {
++        cJSON* light_skin = cJSON_GetObjectItem(skin, "light");
++        if (cJSON_IsObject(light_skin)) {
++            cJSON* text_color = cJSON_GetObjectItem(light_skin, "text_color");
++            cJSON* background_color = cJSON_GetObjectItem(light_skin, "background_color");
++            cJSON* background_image = cJSON_GetObjectItem(light_skin, "background_image");
++            if (cJSON_IsString(text_color)) {
++                light_theme->set_text_color(ParseColor(text_color->valuestring));
++            }
++            if (cJSON_IsString(background_color)) {
++                light_theme->set_background_color(ParseColor(background_color->valuestring));
++                light_theme->set_chat_background_color(ParseColor(background_color->valuestring));
++            }
++            if (cJSON_IsString(background_image)) {
++                if (!GetAssetData(background_image->valuestring, ptr, size)) {
++                    ESP_LOGE(TAG, "The background image file %s is not found", background_image->valuestring);
++                    return false;
++                }
++                auto background_image = std::make_shared<LvglCBinImage>(ptr);
++                light_theme->set_background_image(background_image);
++            }
++        }
++        cJSON* dark_skin = cJSON_GetObjectItem(skin, "dark");
++        if (cJSON_IsObject(dark_skin)) {
++            cJSON* text_color = cJSON_GetObjectItem(dark_skin, "text_color");
++            cJSON* background_color = cJSON_GetObjectItem(dark_skin, "background_color");
++            cJSON* background_image = cJSON_GetObjectItem(dark_skin, "background_image");
++            if (cJSON_IsString(text_color)) {
++                dark_theme->set_text_color(ParseColor(text_color->valuestring));
++            }
++            if (cJSON_IsString(background_color)) {
++                dark_theme->set_background_color(ParseColor(background_color->valuestring));
++                dark_theme->set_chat_background_color(ParseColor(background_color->valuestring));
++            }
++            if (cJSON_IsString(background_image)) {
++                if (!GetAssetData(background_image->valuestring, ptr, size)) {
++                    ESP_LOGE(TAG, "The background image file %s is not found", background_image->valuestring);
++                    return false;
++                }
++                auto background_image = std::make_shared<LvglCBinImage>(ptr);
++                dark_theme->set_background_image(background_image);
++            }
++        }
+     }
+     
+     auto display = Board::GetInstance().GetDisplay();
+-    ESP_LOGI(TAG, "Applying new assets to display");
+-    display->UpdateStyle({
+-        .text_font = text_font_,
+-        .icon_font = nullptr,
+-        .emoji_collection = custom_emoji_collection_,
+-    });
+-
++    ESP_LOGI(TAG, "Refreshing display theme...");
++    display->SetTheme(display->GetTheme());
+     cJSON_Delete(root);
+     return true;
+ }
+diff --git a/main/assets.h b/main/assets.h
+index ccf2fd7..a9781f0 100644
+--- a/main/assets.h
++++ b/main/assets.h
+@@ -54,6 +54,7 @@ private:
+     bool InitializePartition();
+     uint32_t CalculateChecksum(const char* data, uint32_t length);
+     bool GetAssetData(const std::string& name, void*& ptr, size_t& size);
++    lv_color_t ParseColor(const std::string& color);
+ 
+     const esp_partition_t* partition_ = nullptr;
+     esp_partition_mmap_handle_t mmap_handle_ = 0;
+@@ -61,9 +62,7 @@ private:
+     bool partition_valid_ = false;
+     bool checksum_valid_ = false;
+     std::string default_assets_url_;
+-    lv_font_t* text_font_ = nullptr;
+     srmodel_list_t* models_list_ = nullptr;
+-    CustomEmojiCollection* custom_emoji_collection_ = nullptr;
+     std::map<std::string, Asset> assets_;
+ };
+ 
+diff --git a/main/boards/common/ml307_board.cc b/main/boards/common/ml307_board.cc
+index 1bf5e00..63cf09c 100644
+--- a/main/boards/common/ml307_board.cc
++++ b/main/boards/common/ml307_board.cc
+@@ -153,7 +153,10 @@ std::string Ml307Board::GetDeviceStatusJson() {
+     }
+     auto display = board.GetDisplay();
+     if (display && display->height() > 64) { // For LCD display only
+-        cJSON_AddStringToObject(screen, "theme", display->GetTheme().c_str());
++        auto theme = display->GetTheme();
++        if (theme != nullptr) {
++            cJSON_AddStringToObject(screen, "theme", theme->name().c_str());
++        }
+     }
+     cJSON_AddItemToObject(root, "screen", screen);
+ 
+diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
+index 18c5173..7b3bf06 100644
+--- a/main/boards/common/wifi_board.cc
++++ b/main/boards/common/wifi_board.cc
+@@ -216,7 +216,10 @@ std::string WifiBoard::GetDeviceStatusJson() {
+     }
+     auto display = board.GetDisplay();
+     if (display && display->height() > 64) { // For LCD display only
+-        cJSON_AddStringToObject(screen, "theme", display->GetTheme().c_str());
++        auto theme = display->GetTheme();
++        if (theme != nullptr) {
++            cJSON_AddStringToObject(screen, "theme", theme->name().c_str());
++        }
+     }
+     cJSON_AddItemToObject(root, "screen", screen);
+ 
+diff --git a/main/boards/electron-bot/electron_emoji_display.cc b/main/boards/electron-bot/electron_emoji_display.cc
+index 7e9f2fa..01032d0 100644
+--- a/main/boards/electron-bot/electron_emoji_display.cc
++++ b/main/boards/electron-bot/electron_emoji_display.cc
+@@ -1,4 +1,5 @@
+ #include "electron_emoji_display.h"
++#include "lvgl_theme.h"
+ 
+ #include <esp_log.h>
+ #include <font_awesome.h>
+@@ -105,7 +106,11 @@ void ElectronEmojiDisplay::SetupGifContainer() {
+ 
+     lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+ 
+-    LcdDisplay::SetTheme("dark");
++    auto& theme_manager = LvglThemeManager::GetInstance();
++    auto theme = theme_manager.GetTheme("dark");
++    if (theme != nullptr) {
++        LcdDisplay::SetTheme(theme);
++    }
+ }
+ 
+ void ElectronEmojiDisplay::SetEmotion(const char* emotion) {
+diff --git a/main/boards/otto-robot/otto_emoji_display.cc b/main/boards/otto-robot/otto_emoji_display.cc
+index 26ad536..8853c82 100644
+--- a/main/boards/otto-robot/otto_emoji_display.cc
++++ b/main/boards/otto-robot/otto_emoji_display.cc
+@@ -1,4 +1,5 @@
+ #include "otto_emoji_display.h"
++#include "lvgl_theme.h"
+ 
+ #include <esp_log.h>
+ #include <font_awesome.h>
+@@ -107,7 +108,11 @@ void OttoEmojiDisplay::SetupGifContainer() {
+ 
+     lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+ 
+-    LcdDisplay::SetTheme("dark");
++    auto& theme_manager = LvglThemeManager::GetInstance();
++    auto theme = theme_manager.GetTheme("dark");
++    if (theme != nullptr) {
++        LcdDisplay::SetTheme(theme);
++    }
+ }
+ 
+ void OttoEmojiDisplay::SetEmotion(const char* emotion) {
+diff --git a/main/boards/sensecap-watcher/sensecap_watcher.cc b/main/boards/sensecap-watcher/sensecap_watcher.cc
+index a801a77..a34eb37 100644
+--- a/main/boards/sensecap-watcher/sensecap_watcher.cc
++++ b/main/boards/sensecap-watcher/sensecap_watcher.cc
+@@ -46,7 +46,11 @@ class CustomLcdDisplay : public SpiLcdDisplay {
+             : SpiLcdDisplay(io_handle, panel_handle, width, height, offset_x, offset_y, mirror_x, mirror_y, swap_xy) {
+     
+             DisplayLockGuard lock(this);
+-            lv_obj_set_size(status_bar_, LV_HOR_RES, style_.text_font->line_height * 2 + 10);
++            auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++            auto text_font = lvgl_theme->text_font()->font();
++            auto icon_font = lvgl_theme->icon_font()->font();
++
++            lv_obj_set_size(status_bar_, LV_HOR_RES, text_font->line_height * 2 + 10);
+             lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
+             lv_obj_set_style_pad_top(status_bar_, 10, 0);
+             lv_obj_set_style_pad_bottom(status_bar_, 1, 0);
+@@ -54,9 +58,9 @@ class CustomLcdDisplay : public SpiLcdDisplay {
+             // 针对圆形屏幕调整位置
+             //      network  battery  mute     //
+             //               status            //
+-            lv_obj_align(battery_label_, LV_ALIGN_TOP_MID, -2.5 * style_.icon_font->line_height, 0);
+-            lv_obj_align(network_label_, LV_ALIGN_TOP_MID, -0.5 * style_.icon_font->line_height, 0);
+-            lv_obj_align(mute_label_, LV_ALIGN_TOP_MID, 1.5 * style_.icon_font->line_height, 0);
++            lv_obj_align(battery_label_, LV_ALIGN_TOP_MID, -2.5 * icon_font->line_height, 0);
++            lv_obj_align(network_label_, LV_ALIGN_TOP_MID, -0.5 * icon_font->line_height, 0);
++            lv_obj_align(mute_label_, LV_ALIGN_TOP_MID, 1.5 * icon_font->line_height, 0);
+             
+             lv_obj_align(status_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+             lv_obj_set_flex_grow(status_label_, 0);
+diff --git a/main/boards/zhengchen-1.54tft-wifi/zhengchen_lcd_display.h b/main/boards/zhengchen-1.54tft-wifi/zhengchen_lcd_display.h
+index 87fb547..fa6222a 100644
+--- a/main/boards/zhengchen-1.54tft-wifi/zhengchen_lcd_display.h
++++ b/main/boards/zhengchen-1.54tft-wifi/zhengchen_lcd_display.h
+@@ -2,6 +2,7 @@
+ #define ZHENGCHEN_LCD_DISPLAY_H
+ 
+ #include "display/lcd_display.h"
++#include "lvgl_theme.h"
+ #include <esp_lvgl_port.h>
+ 
+ class ZHENGCHEN_LcdDisplay : public SpiLcdDisplay {
+@@ -14,10 +15,12 @@ public:
+     using SpiLcdDisplay::SpiLcdDisplay;
+ 
+     void SetupHighTempWarningPopup() {
++        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++        auto text_font = lvgl_theme->text_font()->font();
+         // 创建高温警告弹窗
+         high_temp_popup_ = lv_obj_create(lv_screen_active());  // 使用当前屏幕
+         lv_obj_set_scrollbar_mode(high_temp_popup_, LV_SCROLLBAR_MODE_OFF);
+-        lv_obj_set_size(high_temp_popup_, LV_HOR_RES * 0.9, style_.text_font->line_height * 2);
++        lv_obj_set_size(high_temp_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
+         lv_obj_align(high_temp_popup_, LV_ALIGN_BOTTOM_MID, 0, 0);
+         lv_obj_set_style_bg_color(high_temp_popup_, lv_palette_main(LV_PALETTE_RED), 0);
+         lv_obj_set_style_radius(high_temp_popup_, 10, 0);
+diff --git a/main/display/display.cc b/main/display/display.cc
+index 6149253..46b4fcb 100644
+--- a/main/display/display.cc
++++ b/main/display/display.cc
+@@ -15,72 +15,13 @@
+ #define TAG "Display"
+ 
+ Display::Display() {
+-    // Notification timer
+-    esp_timer_create_args_t notification_timer_args = {
+-        .callback = [](void *arg) {
+-            Display *display = static_cast<Display*>(arg);
+-            DisplayLockGuard lock(display);
+-            lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
+-            lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+-        },
+-        .arg = this,
+-        .dispatch_method = ESP_TIMER_TASK,
+-        .name = "notification_timer",
+-        .skip_unhandled_events = false,
+-    };
+-    ESP_ERROR_CHECK(esp_timer_create(&notification_timer_args, &notification_timer_));
+-
+-    // Create a power management lock
+-    auto ret = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "display_update", &pm_lock_);
+-    if (ret == ESP_ERR_NOT_SUPPORTED) {
+-        ESP_LOGI(TAG, "Power management not supported");
+-    } else {
+-        ESP_ERROR_CHECK(ret);
+-    }
+ }
+ 
+ Display::~Display() {
+-    if (notification_timer_ != nullptr) {
+-        esp_timer_stop(notification_timer_);
+-        esp_timer_delete(notification_timer_);
+-    }
+-
+-    if (network_label_ != nullptr) {
+-        lv_obj_del(network_label_);
+-    }
+-    if (notification_label_ != nullptr) {
+-        lv_obj_del(notification_label_);
+-    }
+-    if (status_label_ != nullptr) {
+-        lv_obj_del(status_label_);
+-    }
+-    if (mute_label_ != nullptr) {
+-        lv_obj_del(mute_label_);
+-    }
+-    if (battery_label_ != nullptr) {
+-        lv_obj_del(battery_label_);
+-    }
+-    if (emotion_label_ != nullptr) {
+-        lv_obj_del(emotion_label_);
+-    }
+-    if( low_battery_popup_ != nullptr ) {
+-        lv_obj_del(low_battery_popup_);
+-    }
+-    if (pm_lock_ != nullptr) {
+-        esp_pm_lock_delete(pm_lock_);
+-    }
+ }
+ 
+ void Display::SetStatus(const char* status) {
+-    DisplayLockGuard lock(this);
+-    if (status_label_ == nullptr) {
+-        return;
+-    }
+-    lv_label_set_text(status_label_, status);
+-    lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+-    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+-
+-    last_status_update_time_ = std::chrono::system_clock::now();
++    ESP_LOGW(TAG, "SetStatus: %s", status);
+ }
+ 
+ void Display::ShowNotification(const std::string &notification, int duration_ms) {
+@@ -88,134 +29,15 @@ void Display::ShowNotification(const std::string &notification, int duration_ms)
+ }
+ 
+ void Display::ShowNotification(const char* notification, int duration_ms) {
+-    DisplayLockGuard lock(this);
+-    if (notification_label_ == nullptr) {
+-        return;
+-    }
+-    lv_label_set_text(notification_label_, notification);
+-    lv_obj_remove_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+-    lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+-
+-    esp_timer_stop(notification_timer_);
+-    ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
++    ESP_LOGW(TAG, "ShowNotification: %s", notification);
+ }
+ 
+ void Display::UpdateStatusBar(bool update_all) {
+-    auto& app = Application::GetInstance();
+-    auto& board = Board::GetInstance();
+-    auto codec = board.GetAudioCodec();
+-
+-    // Update mute icon
+-    {
+-        DisplayLockGuard lock(this);
+-        if (mute_label_ == nullptr) {
+-            return;
+-        }
+-
+-        // 如果静音状态改变，则更新图标
+-        if (codec->output_volume() == 0 && !muted_) {
+-            muted_ = true;
+-            lv_label_set_text(mute_label_, FONT_AWESOME_VOLUME_XMARK);
+-        } else if (codec->output_volume() > 0 && muted_) {
+-            muted_ = false;
+-            lv_label_set_text(mute_label_, "");
+-        }
+-    }
+-
+-    // Update time
+-    if (app.GetDeviceState() == kDeviceStateIdle) {
+-        if (last_status_update_time_ + std::chrono::seconds(10) < std::chrono::system_clock::now()) {
+-            // Set status to clock "HH:MM"
+-            time_t now = time(NULL);
+-            struct tm* tm = localtime(&now);
+-            // Check if the we have already set the time
+-            if (tm->tm_year >= 2025 - 1900) {
+-                char time_str[16];
+-                strftime(time_str, sizeof(time_str), "%H:%M  ", tm);
+-                SetStatus(time_str);
+-            } else {
+-                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
+-            }
+-        }
+-    }
+-
+-    esp_pm_lock_acquire(pm_lock_);
+-    // 更新电池图标
+-    int battery_level;
+-    bool charging, discharging;
+-    const char* icon = nullptr;
+-    if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+-        if (charging) {
+-            icon = FONT_AWESOME_BATTERY_BOLT;
+-        } else {
+-            const char* levels[] = {
+-                FONT_AWESOME_BATTERY_EMPTY, // 0-19%
+-                FONT_AWESOME_BATTERY_QUARTER,    // 20-39%
+-                FONT_AWESOME_BATTERY_HALF,    // 40-59%
+-                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 60-79%
+-                FONT_AWESOME_BATTERY_FULL, // 80-99%
+-                FONT_AWESOME_BATTERY_FULL, // 100%
+-            };
+-            icon = levels[battery_level / 20];
+-        }
+-        DisplayLockGuard lock(this);
+-        if (battery_label_ != nullptr && battery_icon_ != icon) {
+-            battery_icon_ = icon;
+-            lv_label_set_text(battery_label_, battery_icon_);
+-        }
+-
+-        if (low_battery_popup_ != nullptr) {
+-            if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
+-                if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框隐藏，则显示
+-                    lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+-                    app.PlaySound(Lang::Sounds::OGG_LOW_BATTERY);
+-                }
+-            } else {
+-                // Hide the low battery popup when the battery is not empty
+-                if (!lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框显示，则隐藏
+-                    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+-                }
+-            }
+-        }
+-    }
+-
+-    // 每 10 秒更新一次网络图标
+-    static int seconds_counter = 0;
+-    if (update_all || seconds_counter++ % 10 == 0) {
+-        // 升级固件时，不读取 4G 网络状态，避免占用 UART 资源
+-        auto device_state = Application::GetInstance().GetDeviceState();
+-        static const std::vector<DeviceState> allowed_states = {
+-            kDeviceStateIdle,
+-            kDeviceStateStarting,
+-            kDeviceStateWifiConfiguring,
+-            kDeviceStateListening,
+-            kDeviceStateActivating,
+-        };
+-        if (std::find(allowed_states.begin(), allowed_states.end(), device_state) != allowed_states.end()) {
+-            icon = board.GetNetworkStateIcon();
+-            if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
+-                DisplayLockGuard lock(this);
+-                network_icon_ = icon;
+-                lv_label_set_text(network_label_, network_icon_);
+-            }
+-        }
+-    }
+-
+-    esp_pm_lock_release(pm_lock_);
+ }
+ 
+ 
+ void Display::SetEmotion(const char* emotion) {
+-    const char* utf8 = font_awesome_get_utf8(emotion);
+-    DisplayLockGuard lock(this);
+-    if (emotion_label_ == nullptr) {
+-        return;
+-    }
+-    if (utf8 != nullptr) {
+-        lv_label_set_text(emotion_label_, utf8);
+-    } else {
+-        lv_label_set_text(emotion_label_, FONT_AWESOME_NEUTRAL);
+-    }
++    ESP_LOGW(TAG, "SetEmotion: %s", emotion);
+ }
+ 
+ void Display::SetPreviewImage(const lv_img_dsc_t* image) {
+@@ -227,37 +49,12 @@ void Display::SetPreviewImage(const lv_img_dsc_t* image) {
+ }
+ 
+ void Display::SetChatMessage(const char* role, const char* content) {
+-    DisplayLockGuard lock(this);
+-    if (chat_message_label_ == nullptr) {
+-        return;
+-    }
+-    lv_label_set_text(chat_message_label_, content);
++    ESP_LOGW(TAG, "Role:%s", role);
++    ESP_LOGW(TAG, "     %s", content);
+ }
+ 
+-void Display::SetTheme(const std::string& theme_name) {
+-    current_theme_name_ = theme_name;
+-    Settings settings("display", true);
+-    settings.SetString("theme", theme_name);
++void Display::SetTheme(Theme* theme) {
+ }
+ 
+ void Display::SetPowerSaveMode(bool on) {
+-    if (on) {
+-        SetChatMessage("system", "");
+-        SetEmotion("sleepy");
+-    } else {
+-        SetChatMessage("system", "");
+-        SetEmotion("neutral");
+-    }
+-}
+-
+-void Display::UpdateStyle(const DisplayStyle& style) {
+-    DisplayLockGuard lock(this);
+-    if (style.text_font != nullptr) {
+-        lv_obj_set_style_text_font(lv_screen_active(), style.text_font, 0);
+-        style_.text_font = style.text_font;
+-    }
+-    if (style.emoji_collection != nullptr) {
+-        delete style_.emoji_collection;
+-        style_.emoji_collection = style.emoji_collection;
+-    }
+ }
+diff --git a/main/display/display.h b/main/display/display.h
+index 9c93c54..618d70b 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -11,11 +11,14 @@
+ #include <string>
+ #include <chrono>
+ 
++class Theme {
++public:
++    Theme(const std::string& name) : name_(name) {}
++    virtual ~Theme() = default;
+ 
+-struct DisplayStyle {
+-    const lv_font_t* text_font;
+-    const lv_font_t* icon_font;
+-    EmojiCollection* emoji_collection;
++    inline std::string name() const { return name_; }
++private:
++    std::string name_;
+ };
+ 
+ class Display {
+@@ -29,10 +32,9 @@ public:
+     virtual void SetEmotion(const char* emotion);
+     virtual void SetChatMessage(const char* role, const char* content);
+     virtual void SetPreviewImage(const lv_img_dsc_t* image);
+-    virtual void SetTheme(const std::string& theme_name);
+-    virtual std::string GetTheme() { return current_theme_name_; }
++    virtual void SetTheme(Theme* theme);
++    virtual Theme* GetTheme() { return current_theme_; }
+     virtual void UpdateStatusBar(bool update_all = false);
+-    virtual void UpdateStyle(const DisplayStyle& style);
+     virtual void SetPowerSaveMode(bool on);
+ 
+     inline int width() const { return width_; }
+@@ -41,28 +43,8 @@ public:
+ protected:
+     int width_ = 0;
+     int height_ = 0;
+-    
+-    esp_pm_lock_handle_t pm_lock_ = nullptr;
+-    lv_display_t *display_ = nullptr;
+-
+-    lv_obj_t *emotion_label_ = nullptr;
+-    lv_obj_t *network_label_ = nullptr;
+-    lv_obj_t *status_label_ = nullptr;
+-    lv_obj_t *notification_label_ = nullptr;
+-    lv_obj_t *mute_label_ = nullptr;
+-    lv_obj_t *battery_label_ = nullptr;
+-    lv_obj_t* chat_message_label_ = nullptr;
+-    lv_obj_t* low_battery_popup_ = nullptr;
+-    lv_obj_t* low_battery_label_ = nullptr;
+-    
+-    const char* battery_icon_ = nullptr;
+-    const char* network_icon_ = nullptr;
+-    bool muted_ = false;
+-    std::string current_theme_name_;
+-    DisplayStyle style_;
+-
+-    std::chrono::system_clock::time_point last_status_update_time_;
+-    esp_timer_handle_t notification_timer_ = nullptr;
++
++    Theme* current_theme_ = nullptr;
+ 
+     friend class DisplayLockGuard;
+     virtual bool Lock(int timeout_ms = 0) = 0;
+diff --git a/main/display/esplog_display.cc b/main/display/esplog_display.cc
+deleted file mode 100644
+index b7d4a21..0000000
+--- a/main/display/esplog_display.cc
++++ /dev/null
+@@ -1,39 +0,0 @@
+-#include "esplog_display.h"
+-
+-#include "esp_log.h"
+-
+-#define TAG "EspLogDisplay"
+-
+-
+-EspLogDisplay::EspLogDisplay()
+-{}
+-
+-EspLogDisplay::~EspLogDisplay()
+-{}
+-
+-void EspLogDisplay::SetStatus(const char* status)
+-{
+-    ESP_LOGW(TAG, "SetStatus: %s", status);
+-}
+-
+-void EspLogDisplay::ShowNotification(const char* notification, int duration_ms)
+-{
+-    ESP_LOGW(TAG, "ShowNotification: %s", notification);
+-}
+-void EspLogDisplay::ShowNotification(const std::string &notification, int duration_ms) 
+-{ 
+-    ShowNotification(notification.c_str(), duration_ms); 
+-}
+-
+-
+-void EspLogDisplay::SetEmotion(const char* emotion)
+-{
+-    ESP_LOGW(TAG, "SetEmotion: %s", emotion);
+-}
+-
+-void EspLogDisplay::SetChatMessage(const char* role, const char* content)
+-{
+-    ESP_LOGW(TAG, "Role:%s", role);
+-    ESP_LOGW(TAG, "     %s", content);
+-}
+-
+diff --git a/main/display/esplog_display.h b/main/display/esplog_display.h
+deleted file mode 100644
+index 58b8903..0000000
+--- a/main/display/esplog_display.h
++++ /dev/null
+@@ -1,27 +0,0 @@
+-#ifndef ESPLOG_DISPLAY_H_
+-#define ESPLOG_DISPLAY_H_
+-
+-#include "display.h"
+-
+-#include <string>
+-
+-class EspLogDisplay : public Display { 
+-public:
+-    EspLogDisplay();
+-    ~EspLogDisplay();
+-
+-    virtual void SetStatus(const char* status);
+-    virtual void ShowNotification(const char* notification, int duration_ms = 3000);
+-    virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+-    virtual void SetEmotion(const char* emotion) override;
+-    virtual void SetChatMessage(const char* role, const char* content) override;
+-    virtual inline void SetPreviewImage(const lv_img_dsc_t* image) override {}
+-    virtual inline void SetTheme(const std::string& theme_name) override {}
+-    virtual inline void UpdateStatusBar(bool update_all = false) override {}
+-
+-protected:
+-    virtual inline bool Lock(int timeout_ms = 0) override { return true; } 
+-    virtual inline void Unlock() override {}
+-};
+-
+-#endif
+diff --git a/main/display/lcd_display.cc b/main/display/lcd_display.cc
+index d9bac64..7878a3b 100644
+--- a/main/display/lcd_display.cc
++++ b/main/display/lcd_display.cc
+@@ -1,6 +1,7 @@
+ #include "lcd_display.h"
+-#include "assets/lang_config.h"
+ #include "settings.h"
++#include "lvgl_theme.h"
++#include "assets/lang_config.h"
+ 
+ #include <vector>
+ #include <algorithm>
+@@ -15,78 +16,62 @@
+ 
+ #define TAG "LcdDisplay"
+ 
+-// Color definitions for dark theme
+-#define DARK_BACKGROUND_COLOR       lv_color_hex(0x121212)     // Dark background
+-#define DARK_TEXT_COLOR             lv_color_white()           // White text
+-#define DARK_CHAT_BACKGROUND_COLOR  lv_color_hex(0x1E1E1E)     // Slightly lighter than background
+-#define DARK_USER_BUBBLE_COLOR      lv_color_hex(0x1A6C37)     // Dark green
+-#define DARK_ASSISTANT_BUBBLE_COLOR lv_color_hex(0x333333)     // Dark gray
+-#define DARK_SYSTEM_BUBBLE_COLOR    lv_color_hex(0x2A2A2A)     // Medium gray
+-#define DARK_SYSTEM_TEXT_COLOR      lv_color_hex(0xAAAAAA)     // Light gray text
+-#define DARK_BORDER_COLOR           lv_color_hex(0x333333)     // Dark gray border
+-#define DARK_LOW_BATTERY_COLOR      lv_color_hex(0xFF0000)     // Red for dark mode
+-
+-// Color definitions for light theme
+-#define LIGHT_BACKGROUND_COLOR       lv_color_white()           // White background
+-#define LIGHT_TEXT_COLOR             lv_color_black()           // Black text
+-#define LIGHT_CHAT_BACKGROUND_COLOR  lv_color_hex(0xE0E0E0)     // Light gray background
+-#define LIGHT_USER_BUBBLE_COLOR      lv_color_hex(0x95EC69)     // WeChat green
+-#define LIGHT_ASSISTANT_BUBBLE_COLOR lv_color_white()           // White
+-#define LIGHT_SYSTEM_BUBBLE_COLOR    lv_color_hex(0xE0E0E0)     // Light gray
+-#define LIGHT_SYSTEM_TEXT_COLOR      lv_color_hex(0x666666)     // Dark gray text
+-#define LIGHT_BORDER_COLOR           lv_color_hex(0xE0E0E0)     // Light gray border
+-#define LIGHT_LOW_BATTERY_COLOR      lv_color_black()           // Black for light mode
+-
+-
+-// Define dark theme colors
+-const ThemeColors DARK_THEME = {
+-    .background = DARK_BACKGROUND_COLOR,
+-    .text = DARK_TEXT_COLOR,
+-    .chat_background = DARK_CHAT_BACKGROUND_COLOR,
+-    .user_bubble = DARK_USER_BUBBLE_COLOR,
+-    .assistant_bubble = DARK_ASSISTANT_BUBBLE_COLOR,
+-    .system_bubble = DARK_SYSTEM_BUBBLE_COLOR,
+-    .system_text = DARK_SYSTEM_TEXT_COLOR,
+-    .border = DARK_BORDER_COLOR,
+-    .low_battery = DARK_LOW_BATTERY_COLOR
+-};
+-
+-// Define light theme colors
+-const ThemeColors LIGHT_THEME = {
+-    .background = LIGHT_BACKGROUND_COLOR,
+-    .text = LIGHT_TEXT_COLOR,
+-    .chat_background = LIGHT_CHAT_BACKGROUND_COLOR,
+-    .user_bubble = LIGHT_USER_BUBBLE_COLOR,
+-    .assistant_bubble = LIGHT_ASSISTANT_BUBBLE_COLOR,
+-    .system_bubble = LIGHT_SYSTEM_BUBBLE_COLOR,
+-    .system_text = LIGHT_SYSTEM_TEXT_COLOR,
+-    .border = LIGHT_BORDER_COLOR,
+-    .low_battery = LIGHT_LOW_BATTERY_COLOR
+-};
+-
+ LV_FONT_DECLARE(LVGL_TEXT_FONT);
+ LV_FONT_DECLARE(LVGL_ICON_FONT);
+ LV_FONT_DECLARE(font_awesome_30_4);
+ 
++void LcdDisplay::InitializeLcdThemes() {
++    auto text_font = std::make_shared<LvglBuiltInFont>(&LVGL_TEXT_FONT);
++    auto icon_font = std::make_shared<LvglBuiltInFont>(&LVGL_ICON_FONT);
++    auto large_icon_font = std::make_shared<LvglBuiltInFont>(&font_awesome_30_4);
++
++    // light theme
++    auto light_theme = new LvglTheme("light");
++    light_theme->set_background_color(lv_color_white());
++    light_theme->set_text_color(lv_color_black());
++    light_theme->set_chat_background_color(lv_color_hex(0xE0E0E0));
++    light_theme->set_user_bubble_color(lv_color_hex(0x95EC69));
++    light_theme->set_assistant_bubble_color(lv_color_white());
++    light_theme->set_system_bubble_color(lv_color_hex(0xE0E0E0));
++    light_theme->set_system_text_color(lv_color_hex(0x666666));
++    light_theme->set_border_color(lv_color_hex(0xE0E0E0));
++    light_theme->set_low_battery_color(lv_color_black());
++    light_theme->set_text_font(text_font);
++    light_theme->set_icon_font(icon_font);
++    light_theme->set_large_icon_font(large_icon_font);
++
++    // dark theme
++    auto dark_theme = new LvglTheme("dark");
++    dark_theme->set_background_color(lv_color_hex(0x121212));
++    dark_theme->set_text_color(lv_color_white());
++    dark_theme->set_chat_background_color(lv_color_hex(0x1E1E1E));
++    dark_theme->set_user_bubble_color(lv_color_hex(0x1A6C37));
++    dark_theme->set_assistant_bubble_color(lv_color_hex(0x333333));
++    dark_theme->set_system_bubble_color(lv_color_hex(0x2A2A2A));
++    dark_theme->set_system_text_color(lv_color_hex(0xAAAAAA));
++    dark_theme->set_border_color(lv_color_hex(0x333333));
++    dark_theme->set_low_battery_color(lv_color_hex(0xFF0000));
++    dark_theme->set_text_font(text_font);
++    dark_theme->set_icon_font(icon_font);
++    dark_theme->set_large_icon_font(large_icon_font);
++
++    auto& theme_manager = LvglThemeManager::GetInstance();
++    theme_manager.RegisterTheme("light", light_theme);
++    theme_manager.RegisterTheme("dark", dark_theme);
++}
++
+ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width, int height)
+     : panel_io_(panel_io), panel_(panel) {
+     width_ = width;
+     height_ = height;
+-    style_ = {
+-        .text_font = &LVGL_TEXT_FONT,
+-        .icon_font = &LVGL_ICON_FONT,
+-    };
++
++    // Initialize LCD themes
++    InitializeLcdThemes();
+ 
+     // Load theme from settings
+     Settings settings("display", false);
+-    current_theme_name_ = settings.GetString("theme", "light");
+-
+-    // Update the theme
+-    if (current_theme_name_ == "dark") {
+-        current_theme_ = DARK_THEME;
+-    } else if (current_theme_name_ == "light") {
+-        current_theme_ = LIGHT_THEME;
+-    }
++    std::string theme_name = settings.GetString("theme", "light");
++    current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
+ 
+     // Create a timer to hide the preview image
+     esp_timer_create_args_t preview_timer_args = {
+@@ -339,10 +324,15 @@ void LcdDisplay::Unlock() {
+ void LcdDisplay::SetupUI() {
+     DisplayLockGuard lock(this);
+ 
++    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto text_font = lvgl_theme->text_font()->font();
++    auto icon_font = lvgl_theme->icon_font()->font();
++    auto large_icon_font = lvgl_theme->large_icon_font()->font();
++
+     auto screen = lv_screen_active();
+-    lv_obj_set_style_text_font(screen, style_.text_font, 0);
+-    lv_obj_set_style_text_color(screen, current_theme_.text, 0);
+-    lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
++    lv_obj_set_style_text_font(screen, text_font, 0);
++    lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
+ 
+     /* Container */
+     container_ = lv_obj_create(screen);
+@@ -351,24 +341,24 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_pad_all(container_, 0, 0);
+     lv_obj_set_style_border_width(container_, 0, 0);
+     lv_obj_set_style_pad_row(container_, 0, 0);
+-    lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+-    lv_obj_set_style_border_color(container_, current_theme_.border, 0);
++    lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
++    lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+ 
+     /* Status bar */
+     status_bar_ = lv_obj_create(container_);
+     lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+     lv_obj_set_style_radius(status_bar_, 0, 0);
+-    lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
+-    lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
++    lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
++    lv_obj_set_style_text_color(status_bar_, lvgl_theme->text_color(), 0);
+     
+     /* Content - Chat area */
+     content_ = lv_obj_create(container_);
+     lv_obj_set_style_radius(content_, 0, 0);
+     lv_obj_set_width(content_, LV_HOR_RES);
+     lv_obj_set_flex_grow(content_, 1);
+-    lv_obj_set_style_pad_all(content_, 10, 0);
+-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0); // Background for chat area
+-    lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for chat area
++    lv_obj_set_style_pad_all(content_, lvgl_theme->spacing(4), 0);
++    lv_obj_set_style_border_width(content_, 0, 0);
++    lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0); // Background for chat area
+ 
+     // Enable scrolling for chat content
+     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
+@@ -377,7 +367,7 @@ void LcdDisplay::SetupUI() {
+     // Create a flex container for chat messages
+     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);
+     lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+-    lv_obj_set_style_pad_row(content_, 10, 0); // Space between messages
++    lv_obj_set_style_pad_row(content_, lvgl_theme->spacing(4), 0); // Space between messages
+ 
+     // We'll create chat messages dynamically in SetChatMessage
+     chat_message_label_ = nullptr;
+@@ -387,23 +377,23 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_pad_all(status_bar_, 0, 0);
+     lv_obj_set_style_border_width(status_bar_, 0, 0);
+     lv_obj_set_style_pad_column(status_bar_, 0, 0);
+-    lv_obj_set_style_pad_left(status_bar_, 10, 0);
+-    lv_obj_set_style_pad_right(status_bar_, 10, 0);
+-    lv_obj_set_style_pad_top(status_bar_, 2, 0);
+-    lv_obj_set_style_pad_bottom(status_bar_, 2, 0);
++    lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
++    lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
++    lv_obj_set_style_pad_left(status_bar_, lvgl_theme->spacing(4), 0);
++    lv_obj_set_style_pad_right(status_bar_, lvgl_theme->spacing(4), 0);
+     lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
+     // 设置状态栏的内容垂直居中
+     lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+ 
+     network_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(network_label_, "");
+-    lv_obj_set_style_text_font(network_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(network_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(network_label_, icon_font, 0);
++    lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+ 
+     notification_label_ = lv_label_create(status_bar_);
+     lv_obj_set_flex_grow(notification_label_, 1);
+     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+-    lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(notification_label_, "");
+     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+ 
+@@ -411,26 +401,26 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_flex_grow(status_label_, 1);
+     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
+-    lv_obj_set_style_text_color(status_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
+     
+     mute_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(mute_label_, "");
+-    lv_obj_set_style_text_font(mute_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(mute_label_, icon_font, 0);
++    lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
+ 
+     battery_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(battery_label_, "");
+-    lv_obj_set_style_text_font(battery_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
+-    lv_obj_set_style_margin_left(battery_label_, 5, 0); // 添加左边距，与前面的元素分隔
++    lv_obj_set_style_text_font(battery_label_, icon_font, 0);
++    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0); // 添加左边距，与前面的元素分隔
+ 
+     low_battery_popup_ = lv_obj_create(screen);
+     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+-    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, style_.text_font->line_height * 2);
+-    lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -10);
+-    lv_obj_set_style_bg_color(low_battery_popup_, current_theme_.low_battery, 0);
+-    lv_obj_set_style_radius(low_battery_popup_, 10, 0);
++    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
++    lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
++    lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
++    lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
+     low_battery_label_ = lv_label_create(low_battery_popup_);
+     lv_label_set_text(low_battery_label_, Lang::Strings::BATTERY_NEED_CHARGE);
+     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
+@@ -438,13 +428,13 @@ void LcdDisplay::SetupUI() {
+     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+ 
+     emoji_image_ = lv_img_create(screen);
+-    lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, style_.text_font->line_height + 10);
++    lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, text_font->line_height + lvgl_theme->spacing(2));
+ 
+     // Display AI logo while booting
+     emotion_label_ = lv_label_create(screen);
+     lv_obj_center(emotion_label_);
+-    lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+-    lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(emotion_label_, large_icon_font, 0);
++    lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(emotion_label_, FONT_AWESOME_MICROCHIP_AI);
+ }
+ #if CONFIG_IDF_TARGET_ESP32P4
+@@ -501,20 +491,23 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+         return;
+     }
+ 
++    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto text_font = lvgl_theme->text_font()->font();
++
+     // Create a message bubble
+     lv_obj_t* msg_bubble = lv_obj_create(content_);
+     lv_obj_set_style_radius(msg_bubble, 8, 0);
+     lv_obj_set_scrollbar_mode(msg_bubble, LV_SCROLLBAR_MODE_OFF);
+     lv_obj_set_style_border_width(msg_bubble, 1, 0);
+-    lv_obj_set_style_border_color(msg_bubble, current_theme_.border, 0);
+-    lv_obj_set_style_pad_all(msg_bubble, 8, 0);
++    lv_obj_set_style_border_color(msg_bubble, lvgl_theme->border_color(), 0);
++    lv_obj_set_style_pad_all(msg_bubble, lvgl_theme->spacing(4), 0);
+ 
+     // Create the message text
+     lv_obj_t* msg_text = lv_label_create(msg_bubble);
+     lv_label_set_text(msg_text, content);
+     
+     // 计算文本实际宽度
+-    lv_coord_t text_width = lv_txt_get_width(content, strlen(content), style_.text_font, 0);
++    lv_coord_t text_width = lv_txt_get_width(content, strlen(content), text_font, 0);
+ 
+     // 计算气泡宽度
+     lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;  // 屏幕宽度的85%
+@@ -544,9 +537,9 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+     // Set alignment and style based on message role
+     if (strcmp(role, "user") == 0) {
+         // User messages are right-aligned with green background
+-        lv_obj_set_style_bg_color(msg_bubble, current_theme_.user_bubble, 0);
++        lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->user_bubble_color(), 0);
+         // Set text color for contrast
+-        lv_obj_set_style_text_color(msg_text, current_theme_.text, 0);
++        lv_obj_set_style_text_color(msg_text, lvgl_theme->text_color(), 0);
+         
+         // 设置自定义属性标记气泡类型
+         lv_obj_set_user_data(msg_bubble, (void*)"user");
+@@ -559,9 +552,9 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+         lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
+     } else if (strcmp(role, "assistant") == 0) {
+         // Assistant messages are left-aligned with white background
+-        lv_obj_set_style_bg_color(msg_bubble, current_theme_.assistant_bubble, 0);
++        lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->assistant_bubble_color(), 0);
+         // Set text color for contrast
+-        lv_obj_set_style_text_color(msg_text, current_theme_.text, 0);
++        lv_obj_set_style_text_color(msg_text, lvgl_theme->text_color(), 0);
+         
+         // 设置自定义属性标记气泡类型
+         lv_obj_set_user_data(msg_bubble, (void*)"assistant");
+@@ -574,9 +567,9 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+         lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
+     } else if (strcmp(role, "system") == 0) {
+         // System messages are center-aligned with light gray background
+-        lv_obj_set_style_bg_color(msg_bubble, current_theme_.system_bubble, 0);
++        lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->system_bubble_color(), 0);
+         // Set text color for contrast
+-        lv_obj_set_style_text_color(msg_text, current_theme_.system_text, 0);
++        lv_obj_set_style_text_color(msg_text, lvgl_theme->system_text_color(), 0);
+         
+         // 设置自定义属性标记气泡类型
+         lv_obj_set_user_data(msg_bubble, (void*)"system");
+@@ -647,17 +640,18 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
+         return;
+     }
+     
++    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+     if (img_dsc != nullptr) {
+         // Create a message bubble for image preview
+         lv_obj_t* img_bubble = lv_obj_create(content_);
+         lv_obj_set_style_radius(img_bubble, 8, 0);
+         lv_obj_set_scrollbar_mode(img_bubble, LV_SCROLLBAR_MODE_OFF);
+         lv_obj_set_style_border_width(img_bubble, 1, 0);
+-        lv_obj_set_style_border_color(img_bubble, current_theme_.border, 0);
+-        lv_obj_set_style_pad_all(img_bubble, 8, 0);
++        lv_obj_set_style_border_color(img_bubble, lvgl_theme->border_color(), 0);
++        lv_obj_set_style_pad_all(img_bubble, lvgl_theme->spacing(4), 0);
+         
+         // Set image bubble background color (similar to system message)
+-        lv_obj_set_style_bg_color(img_bubble, current_theme_.assistant_bubble, 0);
++        lv_obj_set_style_bg_color(img_bubble, lvgl_theme->assistant_bubble_color(), 0);
+         
+         // 设置自定义属性标记气泡类型
+         lv_obj_set_user_data(img_bubble, (void*)"image");
+@@ -722,11 +716,15 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
+ #else
+ void LcdDisplay::SetupUI() {
+     DisplayLockGuard lock(this);
++    LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto text_font = lvgl_theme->text_font()->font();
++    auto icon_font = lvgl_theme->icon_font()->font();
++    auto large_icon_font = lvgl_theme->large_icon_font()->font();
+ 
+     auto screen = lv_screen_active();
+-    lv_obj_set_style_text_font(screen, style_.text_font, 0);
+-    lv_obj_set_style_text_color(screen, current_theme_.text, 0);
+-    lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
++    lv_obj_set_style_text_font(screen, text_font, 0);
++    lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
++    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
+ 
+     /* Container */
+     container_ = lv_obj_create(screen);
+@@ -735,15 +733,22 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_pad_all(container_, 0, 0);
+     lv_obj_set_style_border_width(container_, 0, 0);
+     lv_obj_set_style_pad_row(container_, 0, 0);
+-    lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+-    lv_obj_set_style_border_color(container_, current_theme_.border, 0);
++    lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
++    lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+ 
+     /* Status bar */
+     status_bar_ = lv_obj_create(container_);
+-    lv_obj_set_size(status_bar_, LV_HOR_RES, style_.text_font->line_height);
++    lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+     lv_obj_set_style_radius(status_bar_, 0, 0);
+-    lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
+-    lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
++    lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
++    lv_obj_set_style_text_color(status_bar_, lvgl_theme->text_color(), 0);
++    lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
++    lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
++    lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
++    lv_obj_set_style_pad_left(status_bar_, lvgl_theme->spacing(4), 0);
++    lv_obj_set_style_pad_right(status_bar_, lvgl_theme->spacing(4), 0);
++    lv_obj_set_style_border_width(status_bar_, 0, 0);
++    lv_obj_set_style_pad_column(status_bar_, 0, 0);
+     
+     /* Content */
+     content_ = lv_obj_create(container_);
+@@ -751,9 +756,9 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_radius(content_, 0, 0);
+     lv_obj_set_width(content_, LV_HOR_RES);
+     lv_obj_set_flex_grow(content_, 1);
+-    lv_obj_set_style_pad_all(content_, 5, 0);
+-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+-    lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for content
++    lv_obj_set_style_pad_all(content_, 0, 0);
++    lv_obj_set_style_border_width(content_, 0, 0);
++    lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
+ 
+     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN); // 垂直布局（从上到下）
+     lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_SPACE_EVENLY); // 子对象居中对齐，等距分布
+@@ -765,8 +770,8 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_border_width(emoji_box_, 0, 0);
+ 
+     emotion_label_ = lv_label_create(emoji_box_);
+-    lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+-    lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(emotion_label_, large_icon_font, 0);
++    lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(emotion_label_, FONT_AWESOME_MICROCHIP_AI);
+ 
+     emoji_image_ = lv_img_create(emoji_box_);
+@@ -779,28 +784,21 @@ void LcdDisplay::SetupUI() {
+ 
+     chat_message_label_ = lv_label_create(content_);
+     lv_label_set_text(chat_message_label_, "");
+-    lv_obj_set_width(chat_message_label_, LV_HOR_RES * 0.9); // 限制宽度为屏幕宽度的 90%
++    lv_obj_set_width(chat_message_label_, width_ * 0.9); // 限制宽度为屏幕宽度的 90%
+     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // 设置为自动换行模式
+     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // 设置文本居中对齐
+-    lv_obj_set_style_text_color(chat_message_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
+ 
+     /* Status bar */
+-    lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
+-    lv_obj_set_style_pad_all(status_bar_, 0, 0);
+-    lv_obj_set_style_border_width(status_bar_, 0, 0);
+-    lv_obj_set_style_pad_column(status_bar_, 0, 0);
+-    lv_obj_set_style_pad_left(status_bar_, 2, 0);
+-    lv_obj_set_style_pad_right(status_bar_, 2, 0);
+-
+     network_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(network_label_, "");
+-    lv_obj_set_style_text_font(network_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(network_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(network_label_, icon_font, 0);
++    lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+ 
+     notification_label_ = lv_label_create(status_bar_);
+     lv_obj_set_flex_grow(notification_label_, 1);
+     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+-    lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(notification_label_, "");
+     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+ 
+@@ -808,25 +806,26 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_flex_grow(status_label_, 1);
+     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
+-    lv_obj_set_style_text_color(status_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+     lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
+ 
+     mute_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(mute_label_, "");
+-    lv_obj_set_style_text_font(mute_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(mute_label_, icon_font, 0);
++    lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
+ 
+     battery_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(battery_label_, "");
+-    lv_obj_set_style_text_font(battery_label_, style_.icon_font, 0);
+-    lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
++    lv_obj_set_style_text_font(battery_label_, icon_font, 0);
++    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
+ 
+     low_battery_popup_ = lv_obj_create(screen);
+     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+-    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, style_.text_font->line_height * 2);
+-    lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -10);
+-    lv_obj_set_style_bg_color(low_battery_popup_, current_theme_.low_battery, 0);
+-    lv_obj_set_style_radius(low_battery_popup_, 10, 0);
++    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
++    lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
++    lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
++    lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
++    
+     low_battery_label_ = lv_label_create(low_battery_popup_);
+     lv_label_set_text(low_battery_label_, Lang::Strings::BATTERY_NEED_CHARGE);
+     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
+@@ -873,7 +872,8 @@ void LcdDisplay::SetEmotion(const char* emotion) {
+         return;
+     }
+ 
+-    auto img_dsc = style_.emoji_collection != nullptr ? style_.emoji_collection->GetEmojiImage(emotion) : nullptr;
++    auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
++    auto img_dsc = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
+     if (img_dsc == nullptr) {
+         const char* utf8 = font_awesome_get_utf8(emotion);
+         if (utf8 != nullptr && emotion_label_ != nullptr) {
+@@ -901,62 +901,70 @@ void LcdDisplay::SetEmotion(const char* emotion) {
+ #endif
+ }
+ 
+-void LcdDisplay::SetTheme(const std::string& theme_name) {
++void LcdDisplay::SetTheme(Theme* theme) {
+     DisplayLockGuard lock(this);
+     
+-    if (theme_name == "dark" || theme_name == "DARK") {
+-        current_theme_ = DARK_THEME;
+-    } else if (theme_name == "light" || theme_name == "LIGHT") {
+-        current_theme_ = LIGHT_THEME;
+-    } else {
+-        // Invalid theme name, return false
+-        ESP_LOGE(TAG, "Invalid theme name: %s", theme_name.c_str());
+-        return;
+-    }
++    auto lvgl_theme = static_cast<LvglTheme*>(theme);
+     
+     // Get the active screen
+     lv_obj_t* screen = lv_screen_active();
+-    
++
++    // Set font
++    auto text_font = lvgl_theme->text_font()->font();
++    auto icon_font = lvgl_theme->icon_font()->font();
++    auto large_icon_font = lvgl_theme->large_icon_font()->font();
++    lv_obj_set_style_text_font(screen, text_font, 0);
++
++    if (text_font->line_height >= 30) {
++        lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
++        lv_obj_set_style_text_font(battery_label_, large_icon_font, 0);
++        lv_obj_set_style_text_font(network_label_, large_icon_font, 0);
++    } else {
++        lv_obj_set_style_text_font(mute_label_, icon_font, 0);
++        lv_obj_set_style_text_font(battery_label_, icon_font, 0);
++        lv_obj_set_style_text_font(network_label_, icon_font, 0);
++    }
++
+     // Update the screen colors
+-    lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+-    lv_obj_set_style_text_color(screen, current_theme_.text, 0);
++    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
++    lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
+     
+     // Update container colors
+     if (container_ != nullptr) {
+-        lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+-        lv_obj_set_style_border_color(container_, current_theme_.border, 0);
++        lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
++        lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+     }
+     
+     // Update status bar colors
+     if (status_bar_ != nullptr) {
+-        lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
+-        lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
++        lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
++        lv_obj_set_style_text_color(status_bar_, lvgl_theme->text_color(), 0);
+         
+         // Update status bar elements
+         if (network_label_ != nullptr) {
+-            lv_obj_set_style_text_color(network_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+         }
+         if (status_label_ != nullptr) {
+-            lv_obj_set_style_text_color(status_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+         }
+         if (notification_label_ != nullptr) {
+-            lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+         }
+         if (mute_label_ != nullptr) {
+-            lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
+         }
+         if (battery_label_ != nullptr) {
+-            lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
+         }
+         if (emotion_label_ != nullptr) {
+-            lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+         }
+     }
+     
+     // Update content area colors
+     if (content_ != nullptr) {
+-        lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+-        lv_obj_set_style_border_color(content_, current_theme_.border, 0);
++        lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
++        lv_obj_set_style_border_color(content_, lvgl_theme->border_color(), 0);
+         
+         // If we have the chat message style, update all message bubbles
+ #if CONFIG_USE_WECHAT_MESSAGE_STYLE
+@@ -996,17 +1004,17 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
+                 
+                 // 根据气泡类型应用正确的颜色
+                 if (strcmp(bubble_type, "user") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.user_bubble, 0);
++                    lv_obj_set_style_bg_color(bubble, lvgl_theme->user_bubble_color(), 0);
+                 } else if (strcmp(bubble_type, "assistant") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.assistant_bubble, 0); 
++                    lv_obj_set_style_bg_color(bubble, lvgl_theme->assistant_bubble_color(), 0); 
+                 } else if (strcmp(bubble_type, "system") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.system_bubble, 0);
++                    lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
+                 } else if (strcmp(bubble_type, "image") == 0) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.system_bubble, 0);
++                    lv_obj_set_style_bg_color(bubble, lvgl_theme->system_bubble_color(), 0);
+                 }
+                 
+                 // Update border color
+-                lv_obj_set_style_border_color(bubble, current_theme_.border, 0);
++                lv_obj_set_style_border_color(bubble, lvgl_theme->border_color(), 0);
+                 
+                 // Update text color for the message
+                 if (lv_obj_get_child_cnt(bubble) > 0) {
+@@ -1014,84 +1022,33 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
+                     if (text != nullptr) {
+                         // 根据气泡类型设置文本颜色
+                         if (strcmp(bubble_type, "system") == 0) {
+-                            lv_obj_set_style_text_color(text, current_theme_.system_text, 0);
++                            lv_obj_set_style_text_color(text, lvgl_theme->system_text_color(), 0);
+                         } else {
+-                            lv_obj_set_style_text_color(text, current_theme_.text, 0);
++                            lv_obj_set_style_text_color(text, lvgl_theme->text_color(), 0);
+                         }
+                     }
+                 }
+             } else {
+-                // 如果没有标记，回退到之前的逻辑（颜色比较）
+-                // ...保留原有的回退逻辑...
+-                lv_color_t bg_color = lv_obj_get_style_bg_color(bubble, 0);
+-            
+-                // 改进bubble类型检测逻辑，不仅使用颜色比较
+-                bool is_user_bubble = false;
+-                bool is_assistant_bubble = false;
+-                bool is_system_bubble = false;
+-            
+-                // 检查用户bubble
+-                if (lv_color_eq(bg_color, DARK_USER_BUBBLE_COLOR) || 
+-                    lv_color_eq(bg_color, LIGHT_USER_BUBBLE_COLOR) ||
+-                    lv_color_eq(bg_color, current_theme_.user_bubble)) {
+-                    is_user_bubble = true;
+-                }
+-                // 检查系统bubble
+-                else if (lv_color_eq(bg_color, DARK_SYSTEM_BUBBLE_COLOR) || 
+-                         lv_color_eq(bg_color, LIGHT_SYSTEM_BUBBLE_COLOR) ||
+-                         lv_color_eq(bg_color, current_theme_.system_bubble)) {
+-                    is_system_bubble = true;
+-                }
+-                // 剩余的都当作助手bubble处理
+-                else {
+-                    is_assistant_bubble = true;
+-                }
+-            
+-                // 根据bubble类型应用正确的颜色
+-                if (is_user_bubble) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.user_bubble, 0);
+-                } else if (is_assistant_bubble) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.assistant_bubble, 0);
+-                } else if (is_system_bubble) {
+-                    lv_obj_set_style_bg_color(bubble, current_theme_.system_bubble, 0);
+-                }
+-                
+-                // Update border color
+-                lv_obj_set_style_border_color(bubble, current_theme_.border, 0);
+-                
+-                // Update text color for the message
+-                if (lv_obj_get_child_cnt(bubble) > 0) {
+-                    lv_obj_t* text = lv_obj_get_child(bubble, 0);
+-                    if (text != nullptr) {
+-                        // 回退到颜色检测逻辑
+-                        if (lv_color_eq(bg_color, current_theme_.system_bubble) ||
+-                            lv_color_eq(bg_color, DARK_SYSTEM_BUBBLE_COLOR) || 
+-                            lv_color_eq(bg_color, LIGHT_SYSTEM_BUBBLE_COLOR)) {
+-                            lv_obj_set_style_text_color(text, current_theme_.system_text, 0);
+-                        } else {
+-                            lv_obj_set_style_text_color(text, current_theme_.text, 0);
+-                        }
+-                    }
+-                }
++                ESP_LOGW(TAG, "child[%lu] Bubble type is not found", i);
+             }
+         }
+ #else
+         // Simple UI mode - just update the main chat message
+         if (chat_message_label_ != nullptr) {
+-            lv_obj_set_style_text_color(chat_message_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
+         }
+         
+         if (emotion_label_ != nullptr) {
+-            lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
++            lv_obj_set_style_text_color(emotion_label_, lvgl_theme->text_color(), 0);
+         }
+ #endif
+     }
+     
+     // Update low battery popup
+     if (low_battery_popup_ != nullptr) {
+-        lv_obj_set_style_bg_color(low_battery_popup_, current_theme_.low_battery, 0);
++        lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+     }
+ 
+     // No errors occurred. Save theme to settings
+-    Display::SetTheme(theme_name);
++    Display::SetTheme(lvgl_theme);
+ }
+diff --git a/main/display/lcd_display.h b/main/display/lcd_display.h
+index 2664cad..ee0c56b 100644
+--- a/main/display/lcd_display.h
++++ b/main/display/lcd_display.h
+@@ -1,7 +1,7 @@
+ #ifndef LCD_DISPLAY_H
+ #define LCD_DISPLAY_H
+ 
+-#include "display.h"
++#include "lvgl_display.h"
+ 
+ #include <esp_lcd_panel_io.h>
+ #include <esp_lcd_panel_ops.h>
+@@ -12,21 +12,8 @@
+ 
+ #define PREVIEW_IMAGE_DURATION_MS 5000
+ 
+-// Theme color structure
+-struct ThemeColors {
+-    lv_color_t background;
+-    lv_color_t text;
+-    lv_color_t chat_background;
+-    lv_color_t user_bubble;
+-    lv_color_t assistant_bubble;
+-    lv_color_t system_bubble;
+-    lv_color_t system_text;
+-    lv_color_t border;
+-    lv_color_t low_battery;
+-};
+-
+ 
+-class LcdDisplay : public Display {
++class LcdDisplay : public LvglDisplay {
+ protected:
+     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
+     esp_lcd_panel_handle_t panel_ = nullptr;
+@@ -41,8 +28,7 @@ protected:
+     lv_obj_t* emoji_box_ = nullptr;
+     esp_timer_handle_t preview_timer_ = nullptr;
+ 
+-    ThemeColors current_theme_;
+-
++    void InitializeLcdThemes();
+     void SetupUI();
+     virtual bool Lock(int timeout_ms = 0) override;
+     virtual void Unlock() override;
+@@ -60,7 +46,7 @@ public:
+ #endif  
+ 
+     // Add theme switching function
+-    virtual void SetTheme(const std::string& theme_name) override;
++    virtual void SetTheme(Theme* theme) override;
+ };
+ 
+ // SPI LCD显示器
+diff --git a/main/display/emoji_collection.cc b/main/display/lvgl_display/emoji_collection.cc
+similarity index 97%
+rename from main/display/emoji_collection.cc
+rename to main/display/lvgl_display/emoji_collection.cc
+index 8027d33..3ab3ce3 100644
+--- a/main/display/emoji_collection.cc
++++ b/main/display/lvgl_display/emoji_collection.cc
+@@ -122,14 +122,14 @@ const lv_img_dsc_t* Twemoji64::GetEmojiImage(const char* name) const {
+ }
+ 
+ 
+-void CustomEmojiCollection::AddEmoji(const std::string& name, lv_img_dsc_t* image) {
++void CustomEmojiCollection::AddEmoji(const std::string& name, LvglImage* image) {
+     emoji_collection_[name] = image;
+ }
+ 
+ const lv_img_dsc_t* CustomEmojiCollection::GetEmojiImage(const char* name) const {
+     auto it = emoji_collection_.find(name);
+     if (it != emoji_collection_.end()) {
+-        return it->second;
++        return it->second->image_dsc();
+     }
+ 
+     ESP_LOGW(TAG, "Emoji not found: %s", name);
+diff --git a/main/display/emoji_collection.h b/main/display/lvgl_display/emoji_collection.h
+similarity index 82%
+rename from main/display/emoji_collection.h
+rename to main/display/lvgl_display/emoji_collection.h
+index 8883c66..44c54e1 100644
+--- a/main/display/emoji_collection.h
++++ b/main/display/lvgl_display/emoji_collection.h
+@@ -1,10 +1,13 @@
+ #ifndef EMOJI_COLLECTION_H
+ #define EMOJI_COLLECTION_H
+ 
++#include "lvgl_image.h"
++
+ #include <lvgl.h>
+ 
+ #include <map>
+ #include <string>
++#include <memory>
+ 
+ 
+ // Define interface for emoji collection
+@@ -26,9 +29,10 @@ public:
+ 
+ class CustomEmojiCollection : public EmojiCollection {
+ private:
+-    std::map<std::string, lv_img_dsc_t*> emoji_collection_;
++    std::map<std::string, LvglImage*> emoji_collection_;
++
+ public:
+-    void AddEmoji(const std::string& name, lv_img_dsc_t* image);
++    void AddEmoji(const std::string& name, LvglImage* image);
+     virtual const lv_img_dsc_t* GetEmojiImage(const char* name) const override;
+     virtual ~CustomEmojiCollection();
+ };
+diff --git a/main/display/lvgl_display/lvgl_display.cc b/main/display/lvgl_display/lvgl_display.cc
+new file mode 100644
+index 0000000..27aad31
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_display.cc
+@@ -0,0 +1,251 @@
++#include <esp_log.h>
++#include <esp_err.h>
++#include <string>
++#include <cstdlib>
++#include <cstring>
++#include <font_awesome.h>
++
++#include "lvgl_display.h"
++#include "board.h"
++#include "application.h"
++#include "audio_codec.h"
++#include "settings.h"
++#include "assets/lang_config.h"
++
++#define TAG "Display"
++
++LvglDisplay::LvglDisplay() {
++    // Notification timer
++    esp_timer_create_args_t notification_timer_args = {
++        .callback = [](void *arg) {
++            LvglDisplay *display = static_cast<LvglDisplay*>(arg);
++            DisplayLockGuard lock(display);
++            lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
++            lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
++        },
++        .arg = this,
++        .dispatch_method = ESP_TIMER_TASK,
++        .name = "notification_timer",
++        .skip_unhandled_events = false,
++    };
++    ESP_ERROR_CHECK(esp_timer_create(&notification_timer_args, &notification_timer_));
++
++    // Create a power management lock
++    auto ret = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "display_update", &pm_lock_);
++    if (ret == ESP_ERR_NOT_SUPPORTED) {
++        ESP_LOGI(TAG, "Power management not supported");
++    } else {
++        ESP_ERROR_CHECK(ret);
++    }
++}
++
++LvglDisplay::~LvglDisplay() {
++    if (notification_timer_ != nullptr) {
++        esp_timer_stop(notification_timer_);
++        esp_timer_delete(notification_timer_);
++    }
++
++    if (network_label_ != nullptr) {
++        lv_obj_del(network_label_);
++    }
++    if (notification_label_ != nullptr) {
++        lv_obj_del(notification_label_);
++    }
++    if (status_label_ != nullptr) {
++        lv_obj_del(status_label_);
++    }
++    if (mute_label_ != nullptr) {
++        lv_obj_del(mute_label_);
++    }
++    if (battery_label_ != nullptr) {
++        lv_obj_del(battery_label_);
++    }
++    if (emotion_label_ != nullptr) {
++        lv_obj_del(emotion_label_);
++    }
++    if( low_battery_popup_ != nullptr ) {
++        lv_obj_del(low_battery_popup_);
++    }
++    if (pm_lock_ != nullptr) {
++        esp_pm_lock_delete(pm_lock_);
++    }
++}
++
++void LvglDisplay::SetStatus(const char* status) {
++    DisplayLockGuard lock(this);
++    if (status_label_ == nullptr) {
++        return;
++    }
++    lv_label_set_text(status_label_, status);
++    lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
++
++    last_status_update_time_ = std::chrono::system_clock::now();
++}
++
++void LvglDisplay::ShowNotification(const std::string &notification, int duration_ms) {
++    ShowNotification(notification.c_str(), duration_ms);
++}
++
++void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
++    DisplayLockGuard lock(this);
++    if (notification_label_ == nullptr) {
++        return;
++    }
++    lv_label_set_text(notification_label_, notification);
++    lv_obj_remove_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
++
++    esp_timer_stop(notification_timer_);
++    ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
++}
++
++void LvglDisplay::UpdateStatusBar(bool update_all) {
++    auto& app = Application::GetInstance();
++    auto& board = Board::GetInstance();
++    auto codec = board.GetAudioCodec();
++
++    // Update mute icon
++    {
++        DisplayLockGuard lock(this);
++        if (mute_label_ == nullptr) {
++            return;
++        }
++
++        // 如果静音状态改变，则更新图标
++        if (codec->output_volume() == 0 && !muted_) {
++            muted_ = true;
++            lv_label_set_text(mute_label_, FONT_AWESOME_VOLUME_XMARK);
++        } else if (codec->output_volume() > 0 && muted_) {
++            muted_ = false;
++            lv_label_set_text(mute_label_, "");
++        }
++    }
++
++    // Update time
++    if (app.GetDeviceState() == kDeviceStateIdle) {
++        if (last_status_update_time_ + std::chrono::seconds(10) < std::chrono::system_clock::now()) {
++            // Set status to clock "HH:MM"
++            time_t now = time(NULL);
++            struct tm* tm = localtime(&now);
++            // Check if the we have already set the time
++            if (tm->tm_year >= 2025 - 1900) {
++                char time_str[16];
++                strftime(time_str, sizeof(time_str), "%H:%M  ", tm);
++                SetStatus(time_str);
++            } else {
++                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
++            }
++        }
++    }
++
++    esp_pm_lock_acquire(pm_lock_);
++    // 更新电池图标
++    int battery_level;
++    bool charging, discharging;
++    const char* icon = nullptr;
++    if (board.GetBatteryLevel(battery_level, charging, discharging)) {
++        if (charging) {
++            icon = FONT_AWESOME_BATTERY_BOLT;
++        } else {
++            const char* levels[] = {
++                FONT_AWESOME_BATTERY_EMPTY, // 0-19%
++                FONT_AWESOME_BATTERY_QUARTER,    // 20-39%
++                FONT_AWESOME_BATTERY_HALF,    // 40-59%
++                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 60-79%
++                FONT_AWESOME_BATTERY_FULL, // 80-99%
++                FONT_AWESOME_BATTERY_FULL, // 100%
++            };
++            icon = levels[battery_level / 20];
++        }
++        DisplayLockGuard lock(this);
++        if (battery_label_ != nullptr && battery_icon_ != icon) {
++            battery_icon_ = icon;
++            lv_label_set_text(battery_label_, battery_icon_);
++        }
++
++        if (low_battery_popup_ != nullptr) {
++            if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
++                if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框隐藏，则显示
++                    lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++                    app.PlaySound(Lang::Sounds::OGG_LOW_BATTERY);
++                }
++            } else {
++                // Hide the low battery popup when the battery is not empty
++                if (!lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框显示，则隐藏
++                    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++                }
++            }
++        }
++    }
++
++    // 每 10 秒更新一次网络图标
++    static int seconds_counter = 0;
++    if (update_all || seconds_counter++ % 10 == 0) {
++        // 升级固件时，不读取 4G 网络状态，避免占用 UART 资源
++        auto device_state = Application::GetInstance().GetDeviceState();
++        static const std::vector<DeviceState> allowed_states = {
++            kDeviceStateIdle,
++            kDeviceStateStarting,
++            kDeviceStateWifiConfiguring,
++            kDeviceStateListening,
++            kDeviceStateActivating,
++        };
++        if (std::find(allowed_states.begin(), allowed_states.end(), device_state) != allowed_states.end()) {
++            icon = board.GetNetworkStateIcon();
++            if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
++                DisplayLockGuard lock(this);
++                network_icon_ = icon;
++                lv_label_set_text(network_label_, network_icon_);
++            }
++        }
++    }
++
++    esp_pm_lock_release(pm_lock_);
++}
++
++
++void LvglDisplay::SetEmotion(const char* emotion) {
++    const char* utf8 = font_awesome_get_utf8(emotion);
++    DisplayLockGuard lock(this);
++    if (emotion_label_ == nullptr) {
++        return;
++    }
++    if (utf8 != nullptr) {
++        lv_label_set_text(emotion_label_, utf8);
++    } else {
++        lv_label_set_text(emotion_label_, FONT_AWESOME_NEUTRAL);
++    }
++}
++
++void LvglDisplay::SetPreviewImage(const lv_img_dsc_t* image) {
++    // Do nothing but free the image
++    if (image != nullptr) {
++        heap_caps_free((void*)image->data);
++        heap_caps_free((void*)image);
++    }
++}
++
++void LvglDisplay::SetChatMessage(const char* role, const char* content) {
++    DisplayLockGuard lock(this);
++    if (chat_message_label_ == nullptr) {
++        return;
++    }
++    lv_label_set_text(chat_message_label_, content);
++}
++
++void LvglDisplay::SetTheme(Theme* theme) {
++    current_theme_ = theme;
++    Settings settings("display", true);
++    settings.SetString("theme", theme->name());
++}
++
++void LvglDisplay::SetPowerSaveMode(bool on) {
++    if (on) {
++        SetChatMessage("system", "");
++        SetEmotion("sleepy");
++    } else {
++        SetChatMessage("system", "");
++        SetEmotion("neutral");
++    }
++}
+diff --git a/main/display/lvgl_display/lvgl_display.h b/main/display/lvgl_display/lvgl_display.h
+new file mode 100644
+index 0000000..24cc935
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_display.h
+@@ -0,0 +1,57 @@
++#ifndef LVGL_DISPLAY_H
++#define LVGL_DISPLAY_H
++
++#include "display.h"
++
++#include <lvgl.h>
++#include <esp_timer.h>
++#include <esp_log.h>
++#include <esp_pm.h>
++
++#include <string>
++#include <chrono>
++
++class LvglDisplay : public Display {
++public:
++    LvglDisplay();
++    virtual ~LvglDisplay();
++
++    virtual void SetStatus(const char* status);
++    virtual void ShowNotification(const char* notification, int duration_ms = 3000);
++    virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
++    virtual void SetEmotion(const char* emotion);
++    virtual void SetChatMessage(const char* role, const char* content);
++    virtual void SetPreviewImage(const lv_img_dsc_t* image);
++    virtual void SetTheme(Theme* theme);
++    virtual Theme* GetTheme() { return current_theme_; }
++    virtual void UpdateStatusBar(bool update_all = false);
++    virtual void SetPowerSaveMode(bool on);
++
++protected:
++    esp_pm_lock_handle_t pm_lock_ = nullptr;
++    lv_display_t *display_ = nullptr;
++
++    lv_obj_t *emotion_label_ = nullptr;
++    lv_obj_t *network_label_ = nullptr;
++    lv_obj_t *status_label_ = nullptr;
++    lv_obj_t *notification_label_ = nullptr;
++    lv_obj_t *mute_label_ = nullptr;
++    lv_obj_t *battery_label_ = nullptr;
++    lv_obj_t* chat_message_label_ = nullptr;
++    lv_obj_t* low_battery_popup_ = nullptr;
++    lv_obj_t* low_battery_label_ = nullptr;
++    
++    const char* battery_icon_ = nullptr;
++    const char* network_icon_ = nullptr;
++    bool muted_ = false;
++
++    std::chrono::system_clock::time_point last_status_update_time_;
++    esp_timer_handle_t notification_timer_ = nullptr;
++
++    friend class DisplayLockGuard;
++    virtual bool Lock(int timeout_ms = 0) = 0;
++    virtual void Unlock() = 0;
++};
++
++
++#endif
+diff --git a/main/display/lvgl_display/lvgl_font.cc b/main/display/lvgl_display/lvgl_font.cc
+new file mode 100644
+index 0000000..b0a45c7
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_font.cc
+@@ -0,0 +1,13 @@
++#include "lvgl_font.h"
++#include <cbin_font.h>
++
++
++LvglCBinFont::LvglCBinFont(void* data) {
++    font_ = cbin_font_create(static_cast<uint8_t*>(data));
++}
++
++LvglCBinFont::~LvglCBinFont() {
++    if (font_ != nullptr) {
++        cbin_font_delete(font_);
++    }
++}
+\ No newline at end of file
+diff --git a/main/display/lvgl_display/lvgl_font.h b/main/display/lvgl_display/lvgl_font.h
+new file mode 100644
+index 0000000..d539dc0
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_font.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <lvgl.h>
++
++
++class LvglFont {
++public:
++    virtual const lv_font_t* font() const = 0;
++    virtual ~LvglFont() = default;
++};
++
++// Built-in font
++class LvglBuiltInFont : public LvglFont {
++public:
++    LvglBuiltInFont(const lv_font_t* font) : font_(font) {}
++    virtual const lv_font_t* font() const override { return font_; }
++
++private:
++    const lv_font_t* font_;
++};
++
++
++class LvglCBinFont : public LvglFont {
++public:
++    LvglCBinFont(void* data);
++    virtual ~LvglCBinFont();
++    virtual const lv_font_t* font() const override { return font_; }
++
++private:
++    lv_font_t* font_;
++};
+diff --git a/main/display/lvgl_display/lvgl_image.cc b/main/display/lvgl_display/lvgl_image.cc
+new file mode 100644
+index 0000000..015393b
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_image.cc
+@@ -0,0 +1,28 @@
++#include "lvgl_image.h"
++#include <cbin_font.h>
++
++#include <esp_log.h>
++#include <cstring>
++
++#define TAG "LvglImage"
++
++
++LvglRawImage::LvglRawImage(void* data, size_t size) {
++    bzero(&image_dsc_, sizeof(image_dsc_));
++    image_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
++    image_dsc_.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
++    image_dsc_.header.w = 0;
++    image_dsc_.header.h = 0;
++    image_dsc_.data_size = size;
++    image_dsc_.data = static_cast<uint8_t*>(data);
++}
++
++LvglCBinImage::LvglCBinImage(void* data) {
++    image_dsc_ = cbin_img_dsc_create(static_cast<uint8_t*>(data));
++}
++
++LvglCBinImage::~LvglCBinImage() {
++    if (image_dsc_ != nullptr) {
++        cbin_img_dsc_delete(image_dsc_);
++    }
++}
+\ No newline at end of file
+diff --git a/main/display/lvgl_display/lvgl_image.h b/main/display/lvgl_display/lvgl_image.h
+new file mode 100644
+index 0000000..ee6ba0b
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_image.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <lvgl.h>
++
++
++// Wrap around lv_img_dsc_t
++class LvglImage {
++public:
++    virtual const lv_img_dsc_t* image_dsc() const = 0;
++    virtual ~LvglImage() = default;
++};
++
++
++class LvglRawImage : public LvglImage {
++public:
++    LvglRawImage(void* data, size_t size);
++    virtual const lv_img_dsc_t* image_dsc() const override { return &image_dsc_; }
++
++private:
++    lv_img_dsc_t image_dsc_;
++};
++
++
++class LvglCBinImage : public LvglImage {
++public:
++    LvglCBinImage(void* data);
++    virtual ~LvglCBinImage();
++    virtual const lv_img_dsc_t* image_dsc() const override { return image_dsc_; }
++
++private:
++    lv_img_dsc_t* image_dsc_ = nullptr;
++};
+\ No newline at end of file
+diff --git a/main/display/lvgl_display/lvgl_theme.cc b/main/display/lvgl_display/lvgl_theme.cc
+new file mode 100644
+index 0000000..f7512d8
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_theme.cc
+@@ -0,0 +1,19 @@
++#include "lvgl_theme.h"
++
++LvglTheme::LvglTheme(const std::string& name) : Theme(name) {
++}
++
++LvglThemeManager::LvglThemeManager() {
++}
++
++LvglTheme* LvglThemeManager::GetTheme(const std::string& theme_name) {
++    auto it = themes_.find(theme_name);
++    if (it != themes_.end()) {
++        return it->second;
++    }
++    return nullptr;
++}
++
++void LvglThemeManager::RegisterTheme(const std::string& theme_name, LvglTheme* theme) {
++    themes_[theme_name] = theme;
++}
+diff --git a/main/display/lvgl_display/lvgl_theme.h b/main/display/lvgl_display/lvgl_theme.h
+new file mode 100644
+index 0000000..0d466ad
+--- /dev/null
++++ b/main/display/lvgl_display/lvgl_theme.h
+@@ -0,0 +1,92 @@
++#pragma once
++
++#include "display.h"
++#include "lvgl_image.h"
++#include "lvgl_font.h"
++#include "emoji_collection.h"
++
++#include <lvgl.h>
++#include <memory>
++#include <map>
++#include <string>
++
++
++class LvglTheme : public Theme {
++public:
++    LvglTheme(const std::string& name);
++
++    // Properties
++    inline lv_color_t background_color() const { return background_color_; }
++    inline lv_color_t text_color() const { return text_color_; }
++    inline lv_color_t chat_background_color() const { return chat_background_color_; }
++    inline lv_color_t user_bubble_color() const { return user_bubble_color_; }
++    inline lv_color_t assistant_bubble_color() const { return assistant_bubble_color_; }
++    inline lv_color_t system_bubble_color() const { return system_bubble_color_; }
++    inline lv_color_t system_text_color() const { return system_text_color_; }
++    inline lv_color_t border_color() const { return border_color_; }
++    inline lv_color_t low_battery_color() const { return low_battery_color_; }
++    inline std::shared_ptr<LvglImage> background_image() const { return background_image_; }
++    inline std::shared_ptr<EmojiCollection> emoji_collection() const { return emoji_collection_; }
++    inline std::shared_ptr<LvglFont> text_font() const { return text_font_; }
++    inline std::shared_ptr<LvglFont> icon_font() const { return icon_font_; }
++    inline std::shared_ptr<LvglFont> large_icon_font() const { return large_icon_font_; }
++    inline int spacing(int scale) const { return spacing_ * scale; }
++
++    inline void set_background_color(lv_color_t background) { background_color_ = background; }
++    inline void set_text_color(lv_color_t text) { text_color_ = text; }
++    inline void set_chat_background_color(lv_color_t chat_background) { chat_background_color_ = chat_background; }
++    inline void set_user_bubble_color(lv_color_t user_bubble) { user_bubble_color_ = user_bubble; }
++    inline void set_assistant_bubble_color(lv_color_t assistant_bubble) { assistant_bubble_color_ = assistant_bubble; }
++    inline void set_system_bubble_color(lv_color_t system_bubble) { system_bubble_color_ = system_bubble; }
++    inline void set_system_text_color(lv_color_t system_text) { system_text_color_ = system_text; }
++    inline void set_border_color(lv_color_t border) { border_color_ = border; }
++    inline void set_low_battery_color(lv_color_t low_battery) { low_battery_color_ = low_battery; }
++    inline void set_background_image(std::shared_ptr<LvglImage> background_image) { background_image_ = background_image; }
++    inline void set_emoji_collection(std::shared_ptr<EmojiCollection> emoji_collection) { emoji_collection_ = emoji_collection; }
++    inline void set_text_font(std::shared_ptr<LvglFont> text_font) { text_font_ = text_font; }
++    inline void set_icon_font(std::shared_ptr<LvglFont> icon_font) { icon_font_ = icon_font; }
++    inline void set_large_icon_font(std::shared_ptr<LvglFont> large_icon_font) { large_icon_font_ = large_icon_font; }
++
++private:
++    int spacing_ = 2;
++
++    // Colors
++    lv_color_t background_color_;
++    lv_color_t text_color_;
++    lv_color_t chat_background_color_;
++    lv_color_t user_bubble_color_;
++    lv_color_t assistant_bubble_color_;
++    lv_color_t system_bubble_color_;
++    lv_color_t system_text_color_;
++    lv_color_t border_color_;
++    lv_color_t low_battery_color_;
++
++    // Background image
++    std::shared_ptr<LvglImage> background_image_ = nullptr;
++
++    // fonts
++    std::shared_ptr<LvglFont> text_font_ = nullptr;
++    std::shared_ptr<LvglFont> icon_font_ = nullptr;
++    std::shared_ptr<LvglFont> large_icon_font_ = nullptr;
++
++    // Emoji collection
++    std::shared_ptr<EmojiCollection> emoji_collection_ = nullptr;
++};
++
++
++class LvglThemeManager {
++public:
++    static LvglThemeManager& GetInstance() {
++        static LvglThemeManager instance;
++        return instance;
++    }
++
++    void RegisterTheme(const std::string& theme_name, LvglTheme* theme);
++    LvglTheme* GetTheme(const std::string& theme_name);
++
++private:
++    LvglThemeManager();
++    void InitializeDefaultThemes();
++
++    std::map<std::string, LvglTheme*> themes_;
++};
+diff --git a/main/display/oled_display.cc b/main/display/oled_display.cc
+index bc3a1cb..c1fe186 100644
+--- a/main/display/oled_display.cc
++++ b/main/display/oled_display.cc
+@@ -20,10 +20,8 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
+     : panel_io_(panel_io), panel_(panel) {
+     width_ = width;
+     height_ = height;
+-    style_ = {
+-        .text_font = &LVGL_TEXT_FONT,
+-        .icon_font = &LVGL_ICON_FONT,
+-    };
++    text_font_ = &LVGL_TEXT_FONT;
++    icon_font_ = &LVGL_ICON_FONT;
+ 
+     ESP_LOGI(TAG, "Initialize LVGL");
+     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+@@ -126,7 +124,7 @@ void OledDisplay::SetupUI_128x64() {
+     DisplayLockGuard lock(this);
+ 
+     auto screen = lv_screen_active();
+-    lv_obj_set_style_text_font(screen, style_.text_font, 0);
++    lv_obj_set_style_text_font(screen, text_font_, 0);
+     lv_obj_set_style_text_color(screen, lv_color_black(), 0);
+ 
+     /* Container */
+@@ -197,7 +195,7 @@ void OledDisplay::SetupUI_128x64() {
+ 
+     network_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(network_label_, "");
+-    lv_obj_set_style_text_font(network_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(network_label_, icon_font_, 0);
+ 
+     notification_label_ = lv_label_create(status_bar_);
+     lv_obj_set_flex_grow(notification_label_, 1);
+@@ -212,15 +210,15 @@ void OledDisplay::SetupUI_128x64() {
+ 
+     mute_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(mute_label_, "");
+-    lv_obj_set_style_text_font(mute_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(mute_label_, icon_font_, 0);
+ 
+     battery_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(battery_label_, "");
+-    lv_obj_set_style_text_font(battery_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(battery_label_, icon_font_, 0);
+ 
+     low_battery_popup_ = lv_obj_create(screen);
+     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+-    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, style_.text_font->line_height * 2);
++    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font_->line_height * 2);
+     lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, 0);
+     lv_obj_set_style_bg_color(low_battery_popup_, lv_color_black(), 0);
+     lv_obj_set_style_radius(low_battery_popup_, 10, 0);
+@@ -235,7 +233,7 @@ void OledDisplay::SetupUI_128x32() {
+     DisplayLockGuard lock(this);
+ 
+     auto screen = lv_screen_active();
+-    lv_obj_set_style_text_font(screen, style_.text_font, 0);
++    lv_obj_set_style_text_font(screen, text_font_, 0);
+ 
+     /* Container */
+     container_ = lv_obj_create(screen);
+@@ -288,15 +286,15 @@ void OledDisplay::SetupUI_128x32() {
+ 
+     mute_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(mute_label_, "");
+-    lv_obj_set_style_text_font(mute_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(mute_label_, icon_font_, 0);
+ 
+     network_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(network_label_, "");
+-    lv_obj_set_style_text_font(network_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(network_label_, icon_font_, 0);
+ 
+     battery_label_ = lv_label_create(status_bar_);
+     lv_label_set_text(battery_label_, "");
+-    lv_obj_set_style_text_font(battery_label_, style_.icon_font, 0);
++    lv_obj_set_style_text_font(battery_label_, icon_font_, 0);
+ 
+     chat_message_label_ = lv_label_create(side_bar_);
+     lv_obj_set_size(chat_message_label_, width_ - 32, LV_SIZE_CONTENT);
+diff --git a/main/display/oled_display.h b/main/display/oled_display.h
+index a30f440..2b5b21f 100644
+--- a/main/display/oled_display.h
++++ b/main/display/oled_display.h
+@@ -1,13 +1,13 @@
+ #ifndef OLED_DISPLAY_H
+ #define OLED_DISPLAY_H
+ 
+-#include "display.h"
++#include "lvgl_display.h"
+ 
+ #include <esp_lcd_panel_io.h>
+ #include <esp_lcd_panel_ops.h>
+ 
+ 
+-class OledDisplay : public Display {
++class OledDisplay : public LvglDisplay {
+ private:
+     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
+     esp_lcd_panel_handle_t panel_ = nullptr;
+@@ -18,7 +18,8 @@ private:
+     lv_obj_t* content_right_ = nullptr;
+     lv_obj_t* container_ = nullptr;
+     lv_obj_t* side_bar_ = nullptr;
+-    DisplayStyle style_;
++    const lv_font_t* text_font_ = nullptr;
++    const lv_font_t* icon_font_ = nullptr;
+ 
+     virtual bool Lock(int timeout_ms = 0) override;
+     virtual void Unlock() override;
+diff --git a/main/idf_component.yml b/main/idf_component.yml
+index 6a04bc3..04b8ef7 100644
+--- a/main/idf_component.yml
++++ b/main/idf_component.yml
+@@ -6,7 +6,7 @@ dependencies:
+   espressif/esp_lcd_st77916: ^1.0.1
+   espressif/esp_lcd_axs15231b: ^1.0.0
+   espressif/esp_lcd_st7796:
+-    version: 1.3.2
++    version: 1.3.4
+     rules:
+     - if: target not in [esp32c3]
+   espressif/esp_lcd_spd2010: ==1.0.2
+diff --git a/main/mcp_server.cc b/main/mcp_server.cc
+index fc80e8a..5cdfc1d 100644
+--- a/main/mcp_server.cc
++++ b/main/mcp_server.cc
+@@ -14,6 +14,7 @@
+ #include "display.h"
+ #include "board.h"
+ #include "settings.h"
++#include "lvgl_theme.h"
+ 
+ #define TAG "MCP"
+ 
+@@ -77,15 +78,21 @@ void McpServer::AddCommonTools() {
+     }
+ 
+     auto display = board.GetDisplay();
+-    if (display && !display->GetTheme().empty()) {
++    if (display && display->GetTheme() != nullptr) {
+         AddTool("self.screen.set_theme",
+             "Set the theme of the screen. The theme can be `light` or `dark`.",
+             PropertyList({
+                 Property("theme", kPropertyTypeString)
+             }),
+             [display](const PropertyList& properties) -> ReturnValue {
+-                display->SetTheme(properties["theme"].value<std::string>().c_str());
+-                return true;
++                auto theme_name = properties["theme"].value<std::string>();
++                auto& theme_manager = LvglThemeManager::GetInstance();
++                auto theme = theme_manager.GetTheme(theme_name);
++                if (theme != nullptr) {
++                    display->SetTheme(theme);
++                    return true;
++                }
++                return false;
+             });
+     }
+ 

@@ -62,7 +62,11 @@ public:
     virtual void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0) override;
     void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void HideGif() override;
-    virtual bool IsGifPlaying() const override { return gif_img_ != nullptr && gif_is_gif_; }
+    virtual bool IsGifPlaying() const override {
+        return gif_img_ != nullptr && !lv_obj_has_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+    }
+    // Explicitly destroy GIF object and free any managed buffers
+    void DestroyGif();
 
 private:
     // Internal method for showing GIF with managed buffer
