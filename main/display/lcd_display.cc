@@ -21,13 +21,6 @@
 #include <lvgl.h>
 #define TAG "LcdDisplay"
 
-// Test switch: force showing placeholder instead of decoding real GIFs
-// Set to 1 to always use placeholder (for memory behavior isolation)
-// Set to 0 to enable real GIF decoding
-#ifndef FORCE_GIF_PLACEHOLDER_TEST
-#define FORCE_GIF_PLACEHOLDER_TEST 0
-#endif
-
 // Color definitions for dark theme
 #define DARK_BACKGROUND_COLOR       lv_color_hex(0x121212)     // Dark background
 #define DARK_TEXT_COLOR             lv_color_white()           // White text
@@ -91,7 +84,6 @@ static const ThemeColors LIGHT_THEME = {
 
 // Current theme - initialize based on default config
 static ThemeColors current_theme = LIGHT_THEME;
-
 
 LV_FONT_DECLARE(font_awesome_30_4);
 
@@ -257,8 +249,6 @@ LcdDisplay::~LcdDisplay() {
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
     }
-
-
 
     // 然后再清理 LVGL 对象
     if (content_ != nullptr) {
@@ -571,6 +561,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         }
     }
 }
+
 #else
 
 #include <stdlib.h>
@@ -617,6 +608,7 @@ eye_t create_eye(lv_obj_t *parent, int x, int y, int size) {
     // lv_obj_set_style_bg_opa(eye.eyelid, LV_OPA_COVER, 0);
     return eye;
 }
+
 // 随机眨眼动画
 void set_random_blink(lv_obj_t *eyelid, int eye_size) {
     lv_anim_t blink;
@@ -709,7 +701,6 @@ void LcdDisplay::SetupUI() {
 void  LcdDisplay:: SetupUI() {
     DisplayLockGuard lock(this);
     
-
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, fonts_.text_font, 0);
     lv_obj_set_style_text_color(screen, current_theme.text, 0);
@@ -1111,13 +1102,10 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
 
     ESP_LOGI(TAG, "Attempting to show GIF at position (%d, %d), size: %lu bytes", x, y, (unsigned long)gif_size);
 
-    // Validate input parameters
-    if (gif_data == nullptr || gif_size == 0) {
+    if (!gif_data || gif_size == 0) {
         ESP_LOGE(TAG, "Invalid GIF data: data=%p, size=%lu", gif_data, (unsigned long)gif_size);
         return;
     }
-
-    // Validate GIF header
     if (gif_size < 10 || memcmp(gif_data, "GIF", 3) != 0) {
         ESP_LOGE(TAG, "Invalid GIF header, size=%lu", (unsigned long)gif_size);
         return;
@@ -1127,259 +1115,46 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     ESP_LOGI(TAG, "SPIRAM before Show: %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
-    // Official-style path: reuse controller if exists; otherwise create
-    {
-        if (gif_controller_ && gif_img_) {
-            // Unhide and restart controller on reuse
-            lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
-            gif_controller_->Restart();
-            if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
-            lv_obj_move_foreground(gif_img_);
-            ESP_LOGI(TAG, "GIF restarted on existing controller");
-            return;
-        }
+    if (gif_controller_ && gif_img_) {
+        lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+        gif_controller_->Stop();
+        gif_controller_->Start();
+        if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+        lv_obj_move_foreground(gif_img_);
+        ESP_LOGI(TAG, "GIF restarted on existing controller");
+        return;
+    }
 
-        // Build a descriptor that points to raw GIF bytes
-        lv_image_dsc_t src{};
-        src.header.magic = LV_IMAGE_HEADER_MAGIC;
-        src.header.cf = LV_COLOR_FORMAT_UNKNOWN;
-        src.data = gif_data;
-        src.data_size = gif_size;
+    lv_image_dsc_t src{};
+    src.header.magic = LV_IMAGE_HEADER_MAGIC;
+    src.header.cf = LV_COLOR_FORMAT_UNKNOWN;
+    src.data = gif_data;
+    src.data_size = gif_size;
 
-        gif_controller_ = std::make_unique<LvglGif>(&src);
-        if (!gif_controller_ || !gif_controller_->IsLoaded()) {
-            ESP_LOGE(TAG, "Failed to initialize GIF controller");
-            gif_controller_.reset();
-            return;
-        }
-        // Cap FPS by enforcing a minimum frame interval (e.g., 200 ms => <=5 FPS)
-        gif_controller_->SetMinFrameInterval(200);
+    gif_controller_ = std::make_unique<LvglGif>(&src);
+    if (!gif_controller_ || !gif_controller_->IsLoaded()) {
+        ESP_LOGE(TAG, "Failed to initialize GIF controller");
+        gif_controller_.reset();
+        return;
+    }
 
-        if (!gif_img_) {
-            gif_img_ = lv_image_create(lv_screen_active());
-            if (!gif_img_) { gif_controller_.reset(); return; }
-            lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_border_width(gif_img_, 0, 0);
-        }
+    if (!gif_img_) {
+        gif_img_ = lv_image_create(lv_screen_active());
+        if (!gif_img_) { gif_controller_.reset(); return; }
+        lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(gif_img_, 0, 0);
+    }
 
     lv_image_set_src(gif_img_, gif_controller_->image_dsc());
     gif_controller_->SetFrameCallback([this]() {
-        if (gif_img_) {
-            // Source descriptor pointer is stable; just invalidate to redraw
-            lv_obj_invalidate(gif_img_);
-        }
+        if (gif_img_) { lv_obj_invalidate(gif_img_); }
     });
-        gif_controller_->Start();
+    gif_controller_->Start();
 
-        if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
-        lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(gif_img_);
-        ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
-        return;
-    }
-
-#if FORCE_GIF_PLACEHOLDER_TEST
-    ESP_LOGW(TAG, "Forced GIF placeholder mode (testing memory, real GIF disabled)");
-    // Create a tiny placeholder instead of a real GIF to isolate memory effects
-    gif_img_ = lv_obj_create(lv_screen_active());
-    if (gif_img_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create fallback placeholder");
-        return;
-    }
-    lv_obj_set_size(gif_img_, 16, 16);
-    lv_obj_set_style_bg_color(gif_img_, lv_color_hex(0xFF6B6B), 0);
-    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_90, 0);
-    lv_obj_set_style_border_width(gif_img_, 0, 0);
-    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_outline_width(gif_img_, 0, 0);
-    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(gif_img_, 8, 0);
-    if (x == 0 && y == 0) {
-        lv_obj_set_pos(gif_img_, 174, 174);
-    } else {
-        lv_obj_set_pos(gif_img_, x, y);
-    }
-    lv_obj_t* ph_label = lv_label_create(gif_img_);
-    lv_label_set_text(ph_label, "GIF\nOK");
-    lv_obj_set_style_text_color(ph_label, lv_color_white(), 0);
-    lv_obj_center(ph_label);
-    ESP_LOGI(TAG, "GIF placeholder created (forced test mode)");
-    return;
-#endif
-
-    // Log memory before operations
-    uint32_t free_heap_before = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "Free heap before GIF operations: %lu bytes", free_heap_before);
-
-    // Parse GIF logical screen size (little-endian) at bytes 6..9
-    uint16_t gif_w = gif_data[6] | (uint16_t(gif_data[7]) << 8);
-    uint16_t gif_h = gif_data[8] | (uint16_t(gif_data[9]) << 8);
-    if (gif_w == 0 || gif_h == 0) {
-        ESP_LOGW(TAG, "GIF logical size invalid, fallback to 360x360 estimate");
-        gif_w = 360; gif_h = 360;
-    }
-    // LVGL GIF uses ARGB8888 canvas + frame buffer: ~5 bytes per pixel
-    size_t est_gif_bytes = (size_t)gif_w * (size_t)gif_h * 5;
-    ESP_LOGI(TAG, "Estimated GIF RAM need: %ux%u -> ~%u bytes", gif_w, gif_h, (unsigned)est_gif_bytes);
-
-    // Always start from a clean state to avoid any leftover allocations
-    DestroyGif();
-
-    // For this implementation, we'll use the data directly without copying
-    // This works for both static data (embedded arrays) and dynamic data
-    // as long as the caller ensures the data remains valid during display
-    const uint8_t* gif_data_to_use = gif_data;
-
-    // Proceed with LVGL GIF widget (no direct panel drawing)
-
-#if LV_USE_GIF
-    // Let LVGL process pending frees before allocating
-    lv_timer_handler();
-    // Check available memory before creating GIF
-    uint32_t free_heap = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "Free heap before GIF creation: %lu bytes", free_heap);
-    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    size_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    size_t spiram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "Internal heap before GIF: free=%u, largest=%u", (unsigned)internal_free, (unsigned)internal_largest);
-    ESP_LOGI(TAG, "SPIRAM before GIF: free=%u, largest=%u", (unsigned)spiram_free, (unsigned)spiram_largest);
-
-    // Estimate memory needed for GIF (ESP32 with PSRAM can handle large GIFs)
-    uint32_t estimated_memory = 4 * 360 * 360; // ~500KB for 360x360 RGBA canvas
-
-    // Keep generous PSRAM headroom and only WARN on low internal RAM.
-    // With CONFIG_SPIRAM_USE_MALLOC + LV_USE_CLIB_MALLOC, large blocks come from PSRAM.
-    const uint32_t kWarnInternalFree = 20 * 1024;    // warn if below 20KB
-    const uint32_t kWarnInternalLargest = 16 * 1024; // warn if largest < 16KB
-    const size_t kSpiramHeadroom = 200 * 1024;       // keep 200KB PSRAM free
-
-    bool spiram_ok = (spiram_largest >= est_gif_bytes) && (spiram_free >= est_gif_bytes + kSpiramHeadroom);
-    bool heap_ok = (free_heap >= estimated_memory + 100000);
-
-    if (!heap_ok || !spiram_ok) {
-        ESP_LOGW(TAG, "Insufficient memory for GIF in PSRAM path: need ~%lu + 100KB safety, have %lu", estimated_memory, free_heap);
-        ESP_LOGW(TAG, "SPIRAM status: need est=%u, free=%u, largest=%u, headroom>=%u",
-                 (unsigned)est_gif_bytes, (unsigned)spiram_free, (unsigned)spiram_largest, (unsigned)kSpiramHeadroom);
-        goto create_placeholder;
-    }
-
-    if (internal_free < kWarnInternalFree || internal_largest < kWarnInternalLargest) {
-        ESP_LOGW(TAG, "Internal RAM is low (free=%u, largest=%u) but proceeding to try LVGL GIF",
-                 (unsigned)internal_free, (unsigned)internal_largest);
-    }
-
-    // Re-create the GIF object for a clean playback
-
-    // Try to create a GIF object using LVGL's GIF decoder (first time)
-    gif_img_ = lv_gif_create(lv_screen_active());
-    if (gif_img_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create GIF object");
-        goto create_placeholder;
-    }
-
-    // 完全移除边框和所有可能的装饰
-    // 重置所有可能的边框和装饰样式，使用简单的样式设置避免枚举警告
-    lv_obj_set_style_border_width(gif_img_, 0, 0);
-    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_outline_width(gif_img_, 0, 0);
-    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_shadow_width(gif_img_, 0, 0);
-    lv_obj_set_style_shadow_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(gif_img_, 0, 0);
-    lv_obj_set_style_margin_all(gif_img_, 0, 0);
-    // 确保背景透明，只显示GIF内容
-    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
-    // 移除任何可能的默认边框颜色
-    lv_obj_set_style_border_color(gif_img_, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_outline_color(gif_img_, lv_color_hex(0x000000), 0);
-
-    // 额外确保：清除所有可能的样式继承
-    // lv_obj_remove_style_all(gif_img_); // removed to avoid stripping internal styles
-    // 重新应用无边框样式
-    lv_obj_set_style_border_width(gif_img_, 0, 0);
-    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
-
-    // Build a temporary image descriptor to pass raw GIF bytes
-    lv_image_dsc_t local_dsc;
-    memset(&local_dsc, 0, sizeof(local_dsc));
-    local_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    local_dsc.header.cf = LV_COLOR_FORMAT_UNKNOWN; // auto-detect
-    local_dsc.data = gif_data_to_use;
-    local_dsc.data_size = gif_size;
-
-    // Set the GIF source with error handling
-    ESP_LOGI(TAG, "Setting GIF source...");
-    lv_gif_set_src(gif_img_, &local_dsc);
-
-    // Note: LVGL doesn't provide lv_gif_get_src, so we assume success if no crash occurs
-
-    // Position the GIF - center for testing
-    if (x == 0 && y == 0) {
-        // Center position for 360x360 GIF on 412x412 screen: (412-360)/2 = 26
-        lv_obj_set_pos(gif_img_, 26, 26);
-        ESP_LOGI(TAG, "GIF positioned at center (26, 26) for testing");
-    } else {
-        lv_obj_set_pos(gif_img_, x, y);
-        ESP_LOGI(TAG, "GIF positioned at custom location (%d, %d)", x, y);
-    }
-
-    // Ensure GIF is visible
+    if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
     lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_CLICKABLE);  // Make it interactive for testing
-
-    // Bring to front
     lv_obj_move_foreground(gif_img_);
-
-    ESP_LOGI(TAG, "GIF animation created and started successfully");
-    ESP_LOGI(TAG, "GIF size: 360x360, position: (%ld, %ld)", (long)lv_obj_get_x(gif_img_), (long)lv_obj_get_y(gif_img_));
-    ESP_LOGI(TAG, "GIF parent: %p, screen: %p", lv_obj_get_parent(gif_img_), lv_screen_active());
-    ESP_LOGI(TAG, "Free heap after GIF creation: %lu bytes", (unsigned long)esp_get_free_heap_size());
-    ESP_LOGI(TAG, "Internal heap after GIF creation: free=%u, largest=%u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    ESP_LOGI(TAG, "SPIRAM after GIF creation: free=%u, largest=%u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    return;
-
-create_placeholder:
-#else
-create_placeholder:
-#endif
-    // Fallback: create a placeholder if GIF support is not enabled or failed
-    ESP_LOGW(TAG, "Creating GIF placeholder (GIF support disabled or failed)");
-
-    gif_img_ = lv_obj_create(lv_screen_active());
-    if (gif_img_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create fallback placeholder");
-        return;
-    }
-
-    // Set size and style for the placeholder (match GIF size) - 移除边框
-    lv_obj_set_size(gif_img_, 16, 16);
-    lv_obj_set_style_bg_color(gif_img_, lv_color_hex(0xFF6B6B), 0);
-    lv_obj_set_style_bg_opa(gif_img_, LV_OPA_90, 0);
-    lv_obj_set_style_border_width(gif_img_, 0, 0);  // 移除边框
-    lv_obj_set_style_border_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_outline_width(gif_img_, 0, 0);
-    lv_obj_set_style_outline_opa(gif_img_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(gif_img_, 8, 0);
-
-    // Position the placeholder
-    if (x == 0 && y == 0) {
-        lv_obj_set_pos(gif_img_, 174, 174);  // Same as GIF position (412-64)/2 = 174
-    } else {
-        lv_obj_set_pos(gif_img_, x, y);
-    }
-
-    // Add a label to indicate this is a GIF placeholder
-    lv_obj_t* label = lv_label_create(gif_img_);
-    lv_label_set_text(label, "GIF\nOK");
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
-
-    ESP_LOGI(TAG, "GIF placeholder created (decoder temporarily disabled)");
+    ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
 }
 
 void LcdDisplay::HideGif() {

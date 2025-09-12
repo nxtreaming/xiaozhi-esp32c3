@@ -59,7 +59,7 @@ CONFIG_LV_USE_TILEVIEW=n
 CONFIG_LV_USE_WIN=n
 
 # Enable GIF decoder support
-CONFIG_LV_USE_GIF=y
+CONFIG_LV_USE_GIF=n
 
 # Memory optimization settings
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

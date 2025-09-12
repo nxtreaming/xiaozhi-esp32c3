@@ -1,54 +1,101 @@
 #pragma once
 
+#include "../lvgl_image.h"
+#include "gifdec.h"
 #include <lvgl.h>
-#include <functional>
 #include <memory>
+#include <functional>
 
-// Forward declare decoder struct without redefining typedef from gifdec.h
-struct _gd_GIF;
-
+/**
+ * C++ implementation of LVGL GIF widget
+ * Provides GIF animation functionality using gifdec library
+ */
 class LvglGif {
 public:
-    explicit LvglGif(const lv_image_dsc_t* img_dsc);
-    ~LvglGif();
+    explicit LvglGif(const lv_img_dsc_t* img_dsc);
+    virtual ~LvglGif();
 
-    // LVGL image descriptor backed by decoder canvas (ARGB8888)
-    const lv_image_dsc_t* image_dsc() const;
+    // LvglImage interface implementation
+    virtual const lv_img_dsc_t* image_dsc() const;
 
+    /**
+     * Start/restart GIF animation
+     */
     void Start();
-    void Pause();
-    void Resume();
-    void Stop();
-    void Restart();
-    // Set a minimum interval (ms) between frames to cap FPS
-    void SetMinFrameInterval(uint32_t ms);
 
+    /**
+     * Pause GIF animation
+     */
+    void Pause();
+
+    /**
+     * Resume GIF animation
+     */
+    void Resume();
+
+    /**
+     * Stop GIF animation and rewind to first frame
+     */
+    void Stop();
+
+    /**
+     * Check if GIF is currently playing
+     */
     bool IsPlaying() const;
+
+    /**
+     * Check if GIF was loaded successfully
+     */
     bool IsLoaded() const;
 
+    /**
+     * Get loop count
+     */
     int32_t GetLoopCount() const;
+
+    /**
+     * Set loop count
+     */
     void SetLoopCount(int32_t count);
 
+    /**
+     * Get GIF dimensions
+     */
     uint16_t width() const;
     uint16_t height() const;
 
+    /**
+     * Set frame update callback
+     */
     void SetFrameCallback(std::function<void()> callback);
 
 private:
-    void NextFrame();
-    void Cleanup();
-
-private:
-    _gd_GIF* gif_ = nullptr;
-    lv_timer_t* timer_ = nullptr;
-    lv_image_dsc_t img_dsc_{};
-    lv_image_dsc_t img565_dsc_{};
-    uint16_t* buf565_ = nullptr;
-    const uint8_t* src_data_ = nullptr;
-    size_t src_size_ = 0;
-    uint32_t last_call_ = 0;
-    uint32_t min_interval_ms_ = 0; // 0 = no cap, otherwise enforce min interval
-    bool playing_ = false;
-    bool loaded_ = false;
+    // GIF decoder instance
+    gd_GIF* gif_;
+    
+    // LVGL image descriptor
+    lv_img_dsc_t img_dsc_;
+    
+    // Animation timer
+    lv_timer_t* timer_;
+    
+    // Last frame update time
+    uint32_t last_call_;
+    
+    // Animation state
+    bool playing_;
+    bool loaded_;
+    
+    // Frame update callback
     std::function<void()> frame_callback_;
+    
+    /**
+     * Update to next frame
+     */
+    void NextFrame();
+    
+    /**
+     * Cleanup resources
+     */
+    void Cleanup();
 };

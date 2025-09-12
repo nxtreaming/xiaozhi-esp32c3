@@ -10,6 +10,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
             "display/lvgl_display/gif/lvgl_gif.cc"
+            "display/lvgl_display/gif/gifdec.c"
             "protocols/protocol.cc"
             "iot/thing.cc"
             "iot/thing_manager.cc"
@@ -24,7 +25,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "gif_test.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing" "${PROJECT_DIR}/managed_components/lvgl__lvgl/src/libs/gif")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing")
 
 # 添加 IOT 相关文件
 file(GLOB IOT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/iot/things/*.cc)
