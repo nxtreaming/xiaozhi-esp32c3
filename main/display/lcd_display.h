@@ -32,6 +32,9 @@ protected:
 
     // GIF controller (official-style): decode + frame timer
     std::unique_ptr<LvglGif> gif_controller_;
+    // Remember last GIF data to avoid redundant restart
+    const void* last_gif_data_ = nullptr;
+    size_t last_gif_size_ = 0;
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -71,6 +74,8 @@ public:
 private:
     // Internal method for showing GIF with managed buffer
     void ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
+    // Helper: center or position GIF based on x,y (0,0 means center)
+    void SetGifPos(int x, int y);
 };
 
 // RGB LCD显示器

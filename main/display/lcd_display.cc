@@ -243,6 +243,32 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     SetupUI();
 }
 
+// Style for GIF image object (initialized once)
+static lv_style_t s_gif_style;
+static bool s_gif_style_inited = false;
+
+static void ensure_gif_style() {
+    if(s_gif_style_inited)
+        return;
+    lv_style_init(&s_gif_style);
+    lv_style_set_bg_opa(&s_gif_style, LV_OPA_TRANSP);
+    lv_style_set_border_width(&s_gif_style, 0);
+    lv_style_set_outline_width(&s_gif_style, 0);
+    lv_style_set_shadow_width(&s_gif_style, 0);
+    // Optional paddings for a tight image box
+    lv_style_set_pad_all(&s_gif_style, 0);
+    s_gif_style_inited = true;
+}
+
+void LcdDisplay::SetGifPos(int x, int y) {
+    int cx = x, cy = y;
+    if (x == 0 && y == 0 && gif_controller_) {
+        cx = (width_ - gif_controller_->width()) / 2;
+        cy = (height_ - gif_controller_->height()) / 2;
+    }
+    lv_obj_set_pos(gif_img_, cx, cy);
+}
+
 LcdDisplay::~LcdDisplay() {
     // 首先清理 GIF 对象和相关缓冲区
     if (gif_img_ != nullptr) {
@@ -1116,13 +1142,18 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
     if (gif_controller_ && gif_img_) {
-        lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
-        gif_controller_->Stop();
-        gif_controller_->Start();
-        if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
-        lv_obj_move_foreground(gif_img_);
-        ESP_LOGI(TAG, "GIF restarted on existing controller");
-        return;
+        if (last_gif_data_ == gif_data && last_gif_size_ == gif_size) {
+            lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+            if (!gif_controller_->IsPlaying()) {
+                gif_controller_->Start();
+            }
+            SetGifPos(x, y);
+            lv_obj_move_foreground(gif_img_);
+            ESP_LOGI(TAG, "GIF reused without restart");
+            return;
+        }
+        // Different content
+        DestroyGif();
     }
 
     lv_image_dsc_t src{};
@@ -1141,8 +1172,8 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     if (!gif_img_) {
         gif_img_ = lv_image_create(lv_screen_active());
         if (!gif_img_) { gif_controller_.reset(); return; }
-        lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(gif_img_, 0, 0);
+        ensure_gif_style();
+        lv_obj_add_style(gif_img_, &s_gif_style, 0);
     }
 
     lv_image_set_src(gif_img_, gif_controller_->image_dsc());
@@ -1151,10 +1182,12 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
     });
     gif_controller_->Start();
 
-    if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+    SetGifPos(x, y);
     lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(gif_img_);
     ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
+    last_gif_data_ = gif_data;
+    last_gif_size_ = gif_size;
 }
 
 void LcdDisplay::HideGif() {
@@ -1178,6 +1211,8 @@ void LcdDisplay::DestroyGif() {
         gif_controller_->Stop();
         gif_controller_.reset();
     }
+    last_gif_data_ = nullptr;
+    last_gif_size_ = 0;
     if (gif_img_ != nullptr) {
         // Detach source and hide, but keep the lv_image object to avoid re-allocating LVGL draw handlers
         lv_image_set_src(gif_img_, NULL);
@@ -1209,7 +1244,6 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
     // Hide existing GIF if any - this will clean up any previous resources
     HideGif();
 
-
     // Keep a local reference so ShowGif's internal HideGif can't free it
     uint8_t* temp_buffer = gif_data;
 
@@ -1235,17 +1269,19 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
     if (!gif_img_) {
         gif_img_ = lv_image_create(lv_screen_active());
         if (!gif_img_) { gif_controller_.reset(); heap_caps_free(temp_buffer); return; }
-        lv_obj_set_style_bg_opa(gif_img_, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(gif_img_, 0, 0);
+        ensure_gif_style();
+        lv_obj_add_style(gif_img_, &s_gif_style, 0);
     }
     lv_image_set_src(gif_img_, gif_controller_->image_dsc());
     gif_controller_->SetFrameCallback([this]() {
-        if (gif_img_) { lv_image_set_src(gif_img_, gif_controller_->image_dsc()); lv_obj_invalidate(gif_img_); }
+        if (gif_img_) { lv_obj_invalidate(gif_img_); }
     });
     gif_controller_->Start();
-    if (x == 0 && y == 0) { lv_obj_set_pos(gif_img_, 26, 26); } else { lv_obj_set_pos(gif_img_, x, y); }
+    SetGifPos(x, y);
     lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(gif_img_);
+    last_gif_data_ = temp_buffer;
+    last_gif_size_ = gif_size;
     ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
 }
 
