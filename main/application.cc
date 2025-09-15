@@ -108,7 +108,7 @@ void Application::CheckNewVersion()
             Schedule([this, display]()
                      {
                 SetDeviceState(kDeviceStateUpgrading);
-                
+
                 display->SetIcon(FONT_AWESOME_DOWNLOAD);
                 std::string message = std::string(Lang::Strings::NEW_VERSION) + ota_.GetFirmwareVersion();
                 display->SetChatMessage("system", message.c_str());
@@ -698,7 +698,7 @@ void Application::OnClockTimer()
     }
 
     // GIF测试：每45秒切换一次显示/隐藏状态（避开时钟更新时间）
-    if (device_state_ == kDeviceStateIdle && clock_ticks_ > 15) // 启动15秒后开始
+    if (device_state_ == kDeviceStateIdle && !slideshow_running_ && clock_ticks_ > 15) // 启动15秒后开始（幻灯片运行时跳过自动切换）
     {
         // 使用45秒周期，避开10秒的时钟更新周期
         if (clock_ticks_ % 45 == 0) // 每45秒
@@ -712,7 +712,7 @@ void Application::OnClockTimer()
                         HideTestGif();
                     } else {
                         ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
-                        ShowGifFromUrl("http://122.51.57.185:18080/412_think.gif", 0, 0);
+                        SlideShow();
                     }
                 }
             });
@@ -1205,6 +1205,71 @@ bool Application::IsGifPlaying() const
     auto display = Board::GetInstance().GetDisplay();
     return display ? display->IsGifPlaying() : false;
 }
+
+void Application::SlideShow()
+{
+    // Prevent concurrent slideshows
+    if (slideshow_running_) {
+        ESP_LOGW(TAG, "SlideShow already running, ignore request");
+        return;
+    }
+    stop_slideshow_ = false;
+    slideshow_running_ = true;
+
+    background_task_->Schedule([this]() {
+        // List of GIF URLs to show sequentially
+        static const char* kGifUrls[] = {
+            "http://122.51.57.185:18080/412_Normal.gif",
+            "http://122.51.57.185:18080/412_think.gif",
+            "http://122.51.57.185:18080/412_angry.gif",
+            "http://122.51.57.185:18080/412_cheer.gif",
+            "http://122.51.57.185:18080/412_sadly.gif"
+        };
+        constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
+        constexpr int kDwellMs = 5000; // show each GIF ~5 seconds
+
+        ESP_LOGI(TAG, "SlideShow started (loop) (%d items)", kCount);
+
+        while (!stop_slideshow_) {
+            for (int i = 0; i < kCount && !stop_slideshow_; ++i) {
+                if (device_state_ != kDeviceStateIdle) {
+                    ESP_LOGW(TAG, "Device not idle, abort SlideShow");
+                    stop_slideshow_ = true;
+                    break;
+                }
+
+                ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", i + 1, kCount, kGifUrls[i]);
+                ShowGifFromUrl(kGifUrls[i], 0, 0);
+
+                // Wait for dwell time or until stopped/state changed
+                int remaining = kDwellMs;
+                while (remaining > 0 && !stop_slideshow_) {
+                    if (device_state_ != kDeviceStateIdle) {
+                        ESP_LOGW(TAG, "Device state changed, abort SlideShow");
+                        stop_slideshow_ = true;
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    remaining -= 200;
+                }
+            }
+        }
+
+        // Clean up display at the end
+        HideGif();
+        stop_slideshow_ = false;
+        slideshow_running_ = false;
+        ESP_LOGI(TAG, "SlideShow finished");
+    });
+}
+
+void Application::StopSlideShow()
+{
+    if (!slideshow_running_) return;
+    stop_slideshow_ = true;
+    ESP_LOGI(TAG, "SlideShow stop requested");
+}
+
 
 void Application::ShowTestGif()
 {

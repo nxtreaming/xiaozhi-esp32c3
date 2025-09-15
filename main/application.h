@@ -128,6 +128,7 @@
 #include <string>
 #include <mutex>
 #include <list>
+#include <atomic>
 
 #include <opus_encoder.h>
 #include <opus_decoder.h>
@@ -205,6 +206,10 @@ public:
     void HideGif();
     bool IsGifPlaying() const;
 
+    // GIF slideshow
+    void SlideShow();
+    void StopSlideShow();
+
     // GIF test methods
     void ShowTestGif();
     void HideTestGif();
@@ -229,6 +234,10 @@ private:
     bool aborted_ = false;
     bool voice_detected_ = false;
     int clock_ticks_ = 0;
+
+    // Slideshow control flags
+    std::atomic<bool> slideshow_running_{false};
+    std::atomic<bool> stop_slideshow_{false};
 
     // Audio encode / decode
     BackgroundTask* background_task_ = nullptr;

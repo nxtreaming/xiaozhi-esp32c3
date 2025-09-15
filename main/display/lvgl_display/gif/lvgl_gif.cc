@@ -158,7 +158,10 @@ void LvglGif::NextFrame() {
 
     // Check if enough time has passed for the next frame
     uint32_t elapsed = lv_tick_elaps(last_call_);
-    if (elapsed < gif_->gce.delay * 10) {
+    // GIF delay is in hundredths of a second; clamp to a minimum to avoid 0-delay busy updates
+    uint32_t frame_ms = (uint32_t)gif_->gce.delay * 10u;
+    if (frame_ms < 20u) frame_ms = 20u; // minimum 20ms per frame to reduce CPU/WDT risk
+    if (elapsed < frame_ms) {
         return;
     }
 
