@@ -4,6 +4,7 @@
 #include "gif_test.h"
 #include "application.h"
 #include <esp_log.h>
+#include <cstring>
 
 static const char* TAG = "GifUrlTest";
 
@@ -11,8 +12,8 @@ static const char* TAG = "GifUrlTest";
 void test_sample_gif_urls() {
     ESP_LOGI(TAG, "Testing GIF loading from various URLs");
     
-    // 示例1: 小型测试GIF (HTTP)
-    const char* small_gif_url = "http://httpbin.org/image/gif";
+    // 示例1: 指定的标准GIF (HTTP)
+    const char* small_gif_url = "http://122.51.57.185:18080/412_think.gif";
     ESP_LOGI(TAG, "Testing small GIF from: %s", small_gif_url);
     test_gif_from_url(small_gif_url);
     
@@ -34,4 +35,11 @@ void test_custom_gif_url(const char* custom_url) {
     
     ESP_LOGI(TAG, "Testing custom GIF URL: %s", custom_url);
     test_gif_from_url(custom_url);
+}
+
+// 方便直接调用的默认测试入口
+void test_gif_url_default() {
+    const char* url = "http://122.51.57.185:18080/412_think.gif";
+    ESP_LOGI(TAG, "Testing default GIF URL: %s", url);
+    test_gif_from_url(url);
 }

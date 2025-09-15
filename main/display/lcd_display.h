@@ -35,6 +35,9 @@ protected:
     // Remember last GIF data to avoid redundant restart
     const void* last_gif_data_ = nullptr;
     size_t last_gif_size_ = 0;
+    // Managed download buffer (owned) for ShowGifFromUrl path
+    uint8_t* managed_gif_buffer_ = nullptr;
+    size_t managed_gif_buffer_size_ = 0;
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;

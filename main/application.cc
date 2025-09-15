@@ -663,8 +663,8 @@ void Application::Start()
     // 系统启动完成后，延迟3秒显示测试GIF
     background_task_->Schedule([this]() {
         vTaskDelay(pdMS_TO_TICKS(3000));  // 等待3秒让系统稳定
-        ESP_LOGI(TAG, "System startup complete, showing test GIF");
-        ShowTestGif();
+        ESP_LOGI(TAG, "System startup complete, showing URL GIF");
+        ShowGifFromUrl("http://122.51.57.185:18080/412_think.gif", 0, 0);
     });
     // }
 }
@@ -711,8 +711,8 @@ void Application::OnClockTimer()
                         ESP_LOGI(TAG, "Auto hiding test GIF (delayed)");
                         HideTestGif();
                     } else {
-                        ESP_LOGI(TAG, "Auto showing test GIF (delayed)");
-                        ShowTestGif();
+                        ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
+                        ShowGifFromUrl("http://122.51.57.185:18080/412_think.gif", 0, 0);
                     }
                 }
             });

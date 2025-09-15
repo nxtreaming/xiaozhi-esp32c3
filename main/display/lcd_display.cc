@@ -1213,6 +1213,11 @@ void LcdDisplay::DestroyGif() {
     }
     last_gif_data_ = nullptr;
     last_gif_size_ = 0;
+    if (managed_gif_buffer_ != nullptr) {
+        heap_caps_free(managed_gif_buffer_);
+        managed_gif_buffer_ = nullptr;
+        managed_gif_buffer_size_ = 0;
+    }
     if (gif_img_ != nullptr) {
         // Detach source and hide, but keep the lv_image object to avoid re-allocating LVGL draw handlers
         lv_image_set_src(gif_img_, NULL);
@@ -1241,19 +1246,13 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
         return;
     }
 
-    // Hide existing GIF if any - this will clean up any previous resources
-    HideGif();
+    // Fully destroy existing GIF if any - this will clean up previous resources and free managed buffer
+    DestroyGif();
 
     // Keep a local reference so ShowGif's internal HideGif can't free it
     uint8_t* temp_buffer = gif_data;
 
-    // Controller path: keep buffer alive after ShowGif by storing in controller
-    ShowGif(temp_buffer, gif_size, x, y);
-
-    // If ShowGif created a real GIF widget, transfer ownership; otherwise free
-    // For controller path we must keep the buffer alive while playing
-    // Store it in a static lv_image_dsc_t and rebuild controller with this buffer
-    DestroyGif();
+    // Build controller directly with managed buffer
     lv_image_dsc_t src{};
     src.header.magic = LV_IMAGE_HEADER_MAGIC;
     src.header.cf = LV_COLOR_FORMAT_UNKNOWN;
@@ -1282,6 +1281,9 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
     lv_obj_move_foreground(gif_img_);
     last_gif_data_ = temp_buffer;
     last_gif_size_ = gif_size;
+    // Track owned managed buffer for later free in DestroyGif
+    managed_gif_buffer_ = temp_buffer;
+    managed_gif_buffer_size_ = gif_size;
     ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
 }
 
@@ -1290,6 +1292,7 @@ struct HttpDownloadData {
     uint8_t* buffer;
     size_t buffer_size;
     size_t data_len;
+    size_t content_length;
     size_t max_size;
     bool success;
 };
@@ -1318,6 +1321,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
                 size_t content_length = atoi(evt->header_value);
                 ESP_LOGI(TAG, "Content-Length: %zu bytes", content_length);
 
+                download_data->content_length = content_length;
                 // 检查文件大小是否合理 (最大10MB)
                 if (content_length > 10 * 1024 * 1024) {
                     ESP_LOGE(TAG, "GIF file too large: %zu bytes (max 10MB)", content_length);
@@ -1358,9 +1362,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
 
                 // 显示下载进度
                 if (download_data->max_size > 0) {
-                    int progress = (download_data->data_len * 100) / download_data->max_size;
+                    int progress = (download_data->data_len * 100) / download_data->content_length;
                     ESP_LOGI(TAG, "Download progress: %d%% (%zu/%zu bytes)",
-                            progress, download_data->data_len, download_data->max_size);
+                            progress, download_data->data_len, download_data->content_length);
                 }
             }
             break;
@@ -1402,6 +1406,7 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
     download_data.buffer_size = 512 * 1024; // 初始512KB缓冲区
     download_data.max_size = 10 * 1024 * 1024; // 最大10MB
     download_data.data_len = 0;
+    download_data.content_length = 0;
     download_data.success = false;
 
     // 分配初始缓冲区 (优先使用PSRAM)

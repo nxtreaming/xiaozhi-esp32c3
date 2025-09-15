@@ -23,6 +23,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "YT_UART.cc"
             "PFS123.cc"
             "gif_test.cc"
+            "gif_url_test_example.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing")
