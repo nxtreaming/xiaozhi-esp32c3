@@ -102,6 +102,11 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     auto& board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
 
+    // Pause non-essential UI refresh while slideshow is running to reduce SPI flush load
+    if (app.IsSlideShowRunning()) {
+        return;
+    }
+
     // Update mute icon
     {
         DisplayLockGuard lock(this);

@@ -206,6 +206,8 @@ public:
     void HideGif();
     bool IsGifPlaying() const;
 
+    bool IsSlideShowRunning() const;
+
     // GIF slideshow
     void SlideShow();
     void StopSlideShow();

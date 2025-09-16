@@ -544,9 +544,7 @@ void Application::Start()
                         if (device_state_ == kDeviceStateSpeaking) {
                             background_task_->WaitForCompletion();
                             if (keep_listening_) {
-                                
                                 protocol_->SendStartListening(kListeningModeAutoStop);
-                                
                                 SetDeviceState(kDeviceStateListening); 
                             } else {
                                 SetDeviceState(kDeviceStateIdle);
@@ -1201,6 +1199,11 @@ bool Application::IsGifPlaying() const
     return display ? display->IsGifPlaying() : false;
 }
 
+bool Application::IsSlideShowRunning() const
+{
+    return slideshow_running_.load();
+}
+
 void Application::SlideShow()
 {
     // Prevent concurrent slideshows
@@ -1215,7 +1218,8 @@ void Application::SlideShow()
         // List of GIF URLs to show sequentially
         static const char* kGifUrls[] = {
             //"http://122.51.57.185:18080/test1.gif",
-            "http://122.51.57.185:18080/test2.gif",
+            //"http://122.51.57.185:18080/test2.gif",
+            "http://122.51.57.185:18080/test3.gif",
             "http://122.51.57.185:18080/412_Normal.gif",
             //"http://122.51.57.185:18080/412_think.gif",
             //"http://122.51.57.185:18080/412_angry.gif",
