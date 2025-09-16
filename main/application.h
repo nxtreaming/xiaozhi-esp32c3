@@ -210,9 +210,6 @@ public:
     void SlideShow();
     void StopSlideShow();
 
-    // GIF test methods
-    void ShowTestGif();
-    void HideTestGif();
 private:
     Application();
     ~Application();

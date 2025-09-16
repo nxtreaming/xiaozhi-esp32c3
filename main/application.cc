@@ -707,13 +707,8 @@ void Application::OnClockTimer()
             background_task_->Schedule([this]() {
                 vTaskDelay(pdMS_TO_TICKS(2000));  // 延迟2秒
                 if (device_state_ == kDeviceStateIdle) { // 再次检查状态
-                    if (IsGifPlaying()) {
-                        ESP_LOGI(TAG, "Auto hiding test GIF (delayed)");
-                        HideTestGif();
-                    } else {
-                        ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
-                        SlideShow();
-                    }
+                    ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
+                    SlideShow();
                 }
             });
         }
@@ -1269,42 +1264,4 @@ void Application::StopSlideShow()
     if (!slideshow_running_) return;
     stop_slideshow_ = true;
     ESP_LOGI(TAG, "SlideShow stop requested");
-}
-
-
-void Application::ShowTestGif()
-{
-    // 只在空闲状态下显示GIF，避免干扰其他功能
-    if (device_state_ != kDeviceStateIdle) {
-        ESP_LOGW(TAG, "Device not idle, skipping GIF test");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Showing test GIF placeholder in corner of screen");
-
-    // 使用测试GIF数据，显示在右下角避免冲突
-    ShowGif(test_gif_data, test_gif_size, 0, 0);  // 0,0会被映射到右下角
-
-    // 显示提示信息（较短时间避免干扰）
-    auto display = Board::GetInstance().GetDisplay();
-    if (display) {
-        display->ShowNotification("GIF Test", 1500);  // 缩短到1.5秒
-    }
-
-    ESP_LOGI(TAG, "Test GIF placeholder displayed in corner (non-intrusive mode)");
-}
-
-void Application::HideTestGif()
-{
-    ESP_LOGI(TAG, "Hiding test GIF placeholder");
-
-    HideGif();
-
-    // 显示提示信息
-    auto display = Board::GetInstance().GetDisplay();
-    if (display) {
-        display->ShowNotification("GIF Test Stopped", 2000);
-    }
-
-    ESP_LOGI(TAG, "Test GIF placeholder hidden");
 }
