@@ -714,7 +714,9 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
                         gif->gce.transparency ? gif->gce.tindex : 0x100);
 #else
     int j, k;
+    #if !(GIFDEC_USE_RGB565)
     const uint8_t* pal = gif->palette->colors;
+    #endif
 #if GIFDEC_USE_RGB565
     // Build RGB565 palette cache on demand
     if (gif->pal_dirty) {
@@ -764,13 +766,17 @@ static void
 dispose(gd_GIF * gif)
 {
     int i;
+    #if !(GIFDEC_USE_RGB565)
     uint8_t * bgcolor;
+    #endif
     switch(gif->gce.disposal) {
         case 2: /* Restore to background color. */
+            #if !(GIFDEC_USE_RGB565)
             bgcolor = &gif->palette->colors[gif->bgindex * 3];
 
             uint8_t opa = 0xff;
             if(gif->gce.transparency) opa = 0x00;
+            #endif
 
             i = gif->fy * gif->width + gif->fx;
 #if defined(GIFDEC_FILL_BG) && !(GIFDEC_USE_RGB565)
