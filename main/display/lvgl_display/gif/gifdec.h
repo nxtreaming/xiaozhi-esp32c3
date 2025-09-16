@@ -59,6 +59,10 @@ typedef struct _gd_GIF {
 #if LV_GIF_CACHE_DECODE_DATA
     uint8_t *lzw_cache;
 #endif
+#if GIFDEC_USE_RGB565
+    uint16_t pal16_cache[256];
+    uint8_t  pal_dirty; /* 1 if palette changed and cache needs rebuild */
+#endif
 } gd_GIF;
 
 gd_GIF * gd_open_gif_file(const char * fname);

@@ -158,6 +158,9 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
     gif->gct.size = gct_sz;
     f_gif_read(gif, gif->gct.colors, 3 * gif->gct.size);
     gif->palette = &gif->gct;
+#if GIFDEC_USE_RGB565
+    gif->pal_dirty = 1;
+#endif
     gif->bgindex = bgidx;
     gif->canvas = (uint8_t *) &gif[1];
 #if GIFDEC_USE_RGB565
@@ -687,9 +690,16 @@ read_image(gd_GIF * gif)
         gif->lct.size = 1 << ((fisrz & 0x07) + 1);
         f_gif_read(gif, gif->lct.colors, 3 * gif->lct.size);
         gif->palette = &gif->lct;
+#if GIFDEC_USE_RGB565
+        gif->pal_dirty = 1;
+#endif
     }
-    else
+    else {
+#if GIFDEC_USE_RGB565
+        gif->pal_dirty = (gif->palette != &gif->gct) ? 1 : 0;
+#endif
         gif->palette = &gif->gct;
+    }
     /* Image Data. */
     return read_image_data(gif, interlace);
 }
@@ -706,14 +716,17 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
     int j, k;
     const uint8_t* pal = gif->palette->colors;
 #if GIFDEC_USE_RGB565
-    // Precompute RGB565 palette
-    uint16_t pal16[256];
-    int pcount = gif->palette->size;
-    for (int pi = 0; pi < pcount; ++pi) {
-        uint8_t r = pal[pi * 3 + 0];
-        uint8_t g = pal[pi * 3 + 1];
-        uint8_t b = pal[pi * 3 + 2];
-        pal16[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    // Build RGB565 palette cache on demand
+    if (gif->pal_dirty) {
+        int pcount_build = gif->palette->size;
+        const uint8_t* pal_build = gif->palette->colors;
+        for (int pi = 0; pi < pcount_build; ++pi) {
+            uint8_t r = pal_build[pi * 3 + 0];
+            uint8_t g = pal_build[pi * 3 + 1];
+            uint8_t b = pal_build[pi * 3 + 2];
+            gif->pal16_cache[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        }
+        gif->pal_dirty = 0;
     }
     uint16_t* buf16 = (uint16_t*)buffer;
 #else
@@ -735,7 +748,7 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
             uint8_t index = gif->frame[row_base + k];
             if(!gif->gce.transparency || index != gif->gce.tindex) {
 #if GIFDEC_USE_RGB565
-                buf16[i + k] = pal16[index];
+                buf16[i + k] = gif->pal16_cache[index];
 #else
                 buf32[i + k] = pal32[index];
 #endif
@@ -765,7 +778,19 @@ dispose(gd_GIF * gif)
 #else
             int j, k;
     #if GIFDEC_USE_RGB565
-            uint16_t bg16 = (uint16_t)(((bgcolor[0] & 0xF8) << 8) | ((bgcolor[1] & 0xFC) << 3) | (bgcolor[2] >> 3));
+            // Ensure palette cache is ready before using background color
+            if (gif->pal_dirty) {
+                int pcount_build = gif->palette->size;
+                const uint8_t* pal_build = gif->palette->colors;
+                for (int pi = 0; pi < pcount_build; ++pi) {
+                    uint8_t r = pal_build[pi * 3 + 0];
+                    uint8_t g = pal_build[pi * 3 + 1];
+                    uint8_t b = pal_build[pi * 3 + 2];
+                    gif->pal16_cache[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+                }
+                gif->pal_dirty = 0;
+            }
+            uint16_t bg16 = gif->pal16_cache[gif->bgindex];
             uint16_t* buf16 = (uint16_t*)gif->canvas;
             for(j = 0; j < gif->fh; j++) {
                 for(k = 0; k < gif->fw; k++) {
