@@ -660,11 +660,11 @@ void Application::Start()
     SetDeviceState(kDeviceStateIdle);  //xkDeviceStateIdle
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
-    // 系统启动完成后，延迟3秒显示测试GIF
+    // 系统启动完成后，延迟3秒启动幻灯片
     background_task_->Schedule([this]() {
         vTaskDelay(pdMS_TO_TICKS(3000));  // 等待3秒让系统稳定
-        ESP_LOGI(TAG, "System startup complete, showing URL GIF");
-        ShowGifFromUrl("http://122.51.57.185:18080/412_think.gif", 0, 0);
+        ESP_LOGI(TAG, "System startup complete, starting SlideShow");
+        SlideShow();
     });
     // }
 }
@@ -1214,7 +1214,8 @@ void Application::SlideShow()
     background_task_->Schedule([this]() {
         // List of GIF URLs to show sequentially
         static const char* kGifUrls[] = {
-            "http://122.51.57.185:18080/test1.gif",
+            //"http://122.51.57.185:18080/test1.gif",
+            "http://122.51.57.185:18080/test2.gif",
             "http://122.51.57.185:18080/412_Normal.gif",
             //"http://122.51.57.185:18080/412_think.gif",
             //"http://122.51.57.185:18080/412_angry.gif",
