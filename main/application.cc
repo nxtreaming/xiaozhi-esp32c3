@@ -1219,11 +1219,12 @@ void Application::SlideShow()
     background_task_->Schedule([this]() {
         // List of GIF URLs to show sequentially
         static const char* kGifUrls[] = {
+            "http://122.51.57.185:18080/test1.gif",
             "http://122.51.57.185:18080/412_Normal.gif",
-            "http://122.51.57.185:18080/412_think.gif",
-            "http://122.51.57.185:18080/412_angry.gif",
-            "http://122.51.57.185:18080/412_cheer.gif",
-            "http://122.51.57.185:18080/412_sadly.gif"
+            //"http://122.51.57.185:18080/412_think.gif",
+            //"http://122.51.57.185:18080/412_angry.gif",
+            "http://122.51.57.185:18080/412_cheer.gif"
+            //"http://122.51.57.185:18080/412_sadly.gif"
         };
         constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
         constexpr int kDwellMs = 5000; // show each GIF ~5 seconds
