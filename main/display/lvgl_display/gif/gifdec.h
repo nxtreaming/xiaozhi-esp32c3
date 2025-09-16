@@ -9,6 +9,11 @@ extern "C" {
 
 #include <stdint.h>
 
+// Compile-time switch: 1=use RGB565 canvas (2B/px), 0=use ARGB8888 canvas (4B/px)
+#ifndef GIFDEC_USE_RGB565
+#define GIFDEC_USE_RGB565 1
+#endif
+
 typedef struct _gd_Palette {
     int size;
     uint8_t colors[0x100 * 3];

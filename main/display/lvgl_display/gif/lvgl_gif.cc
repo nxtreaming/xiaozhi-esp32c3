@@ -20,12 +20,21 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc)
     memset(&img_dsc_, 0, sizeof(img_dsc_));
     img_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
     img_dsc_.header.flags = LV_IMAGE_FLAGS_MODIFIABLE;
+#if GIFDEC_USE_RGB565
+    img_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+    img_dsc_.header.w = gif_->width;
+    img_dsc_.header.h = gif_->height;
+    img_dsc_.header.stride = gif_->width * 2;
+    img_dsc_.data = gif_->canvas;
+    img_dsc_.data_size = gif_->width * gif_->height * 2;
+#else
     img_dsc_.header.cf = LV_COLOR_FORMAT_ARGB8888;
     img_dsc_.header.w = gif_->width;
     img_dsc_.header.h = gif_->height;
     img_dsc_.header.stride = gif_->width * 4;
     img_dsc_.data = gif_->canvas;
     img_dsc_.data_size = gif_->width * gif_->height * 4;
+#endif
 
     // Render first frame
     if (gif_->canvas) {

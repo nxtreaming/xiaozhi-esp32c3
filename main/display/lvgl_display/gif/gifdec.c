@@ -121,17 +121,33 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
         goto fail;
     }
 #if LV_GIF_CACHE_DECODE_DATA
+    #if GIFDEC_USE_RGB565
+    if(0 == (INT_MAX - sizeof(gd_GIF) - LZW_CACHE_SIZE) / width / height / 3){
+        LV_LOG_WARN("Image dimensions are too large");
+        goto fail;
+    }
+    gif = lv_malloc(sizeof(gd_GIF) + 3 * width * height + LZW_CACHE_SIZE);
+    #else
     if(0 == (INT_MAX - sizeof(gd_GIF) - LZW_CACHE_SIZE) / width / height / 5){
         LV_LOG_WARN("Image dimensions are too large");
         goto fail;
     }
     gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height + LZW_CACHE_SIZE);
+    #endif
 #else
+    #if GIFDEC_USE_RGB565
+    if(0 == (INT_MAX - sizeof(gd_GIF)) / width / height / 3){
+        LV_LOG_WARN("Image dimensions are too large");
+        goto fail;
+    }
+    gif = lv_malloc(sizeof(gd_GIF) + 3 * width * height);
+    #else
     if(0 == (INT_MAX - sizeof(gd_GIF)) / width / height / 5){
         LV_LOG_WARN("Image dimensions are too large");
         goto fail;
     }
     gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height);
+    #endif
 #endif
     if(!gif) goto fail;
     memcpy(gif, gif_base, sizeof(gd_GIF));
@@ -144,7 +160,11 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
     gif->palette = &gif->gct;
     gif->bgindex = bgidx;
     gif->canvas = (uint8_t *) &gif[1];
+#if GIFDEC_USE_RGB565
+    gif->frame = &gif->canvas[2 * width * height];
+#else
     gif->frame = &gif->canvas[4 * width * height];
+#endif
     if(gif->bgindex) {
         memset(gif->frame, gif->bgindex, gif->width * gif->height);
     }
@@ -153,15 +173,26 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
     gif->lzw_cache = gif->frame + width * height;
     #endif
 
-#ifdef GIFDEC_FILL_BG
+#if defined(GIFDEC_FILL_BG) && !(GIFDEC_USE_RGB565)
     GIFDEC_FILL_BG(gif->canvas, gif->width * gif->height, 1, gif->width * gif->height, bgcolor, 0x00);
 #else
+    #if GIFDEC_USE_RGB565
+    {
+        uint16_t* buf16 = (uint16_t*)gif->canvas;
+        uint8_t r = *(bgcolor + 0), g = *(bgcolor + 1), b = *(bgcolor + 2);
+        uint16_t bg565 = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        for(int i = 0; i < gif->width * gif->height; i++) {
+            buf16[i] = bg565;
+        }
+    }
+    #else
     for(int i = 0; i < gif->width * gif->height; i++) {
         gif->canvas[i * 4 + 0] = *(bgcolor + 2);
         gif->canvas[i * 4 + 1] = *(bgcolor + 1);
         gif->canvas[i * 4 + 2] = *(bgcolor + 0);
-        gif->canvas[i * 4 + 3] = 0x00;  // 初始化为透明，让第一帧根据自己的透明度设置来渲染
+        gif->canvas[i * 4 + 3] = 0x00;  // transparent background initially
     }
+    #endif
 #endif
     gif->anim_start = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
     gif->loop_count = -1;
@@ -667,14 +698,26 @@ static void
 render_frame_rect(gd_GIF * gif, uint8_t * buffer)
 {
     int i = gif->fy * gif->width + gif->fx;
-#ifdef GIFDEC_RENDER_FRAME
+#if defined(GIFDEC_RENDER_FRAME) && !(GIFDEC_USE_RGB565)
     GIFDEC_RENDER_FRAME(&buffer[i * 4], gif->fw, gif->fh, gif->width,
                         &gif->frame[i], gif->palette->colors,
                         gif->gce.transparency ? gif->gce.tindex : 0x100);
 #else
     int j, k;
     const uint8_t* pal = gif->palette->colors;
-    // Precompute ARGB8888 palette (memory order: BB,GG,RR,AA for little-endian)
+#if GIFDEC_USE_RGB565
+    // Precompute RGB565 palette
+    uint16_t pal16[256];
+    int pcount = gif->palette->size;
+    for (int pi = 0; pi < pcount; ++pi) {
+        uint8_t r = pal[pi * 3 + 0];
+        uint8_t g = pal[pi * 3 + 1];
+        uint8_t b = pal[pi * 3 + 2];
+        pal16[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    }
+    uint16_t* buf16 = (uint16_t*)buffer;
+#else
+    // Precompute ARGB8888 palette
     uint32_t pal32[256];
     int pcount = gif->palette->size;
     for (int pi = 0; pi < pcount; ++pi) {
@@ -684,13 +727,18 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
         pal32[pi] = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
     }
     uint32_t* buf32 = (uint32_t*)buffer;
+#endif
 
     for(j = 0; j < gif->fh; j++) {
         int row_base = (gif->fy + j) * gif->width + gif->fx;
         for(k = 0; k < gif->fw; k++) {
             uint8_t index = gif->frame[row_base + k];
             if(!gif->gce.transparency || index != gif->gce.tindex) {
+#if GIFDEC_USE_RGB565
+                buf16[i + k] = pal16[index];
+#else
                 buf32[i + k] = pal32[index];
+#endif
             }
         }
         i += gif->width;
@@ -712,10 +760,21 @@ dispose(gd_GIF * gif)
             if(gif->gce.transparency) opa = 0x00;
 
             i = gif->fy * gif->width + gif->fx;
-#ifdef GIFDEC_FILL_BG
+#if defined(GIFDEC_FILL_BG) && !(GIFDEC_USE_RGB565)
             GIFDEC_FILL_BG(&(gif->canvas[i * 4]), gif->fw, gif->fh, gif->width, bgcolor, opa);
 #else
             int j, k;
+    #if GIFDEC_USE_RGB565
+            uint16_t bg16 = (uint16_t)(((bgcolor[0] & 0xF8) << 8) | ((bgcolor[1] & 0xFC) << 3) | (bgcolor[2] >> 3));
+            uint16_t* buf16 = (uint16_t*)gif->canvas;
+            for(j = 0; j < gif->fh; j++) {
+                for(k = 0; k < gif->fw; k++) {
+                    buf16[i + k] = bg16;
+                }
+                i += gif->width;
+                if ((j & 0x0F) == 0) { GIFDEC_YIELD(); }
+            }
+    #else
             uint32_t bg32 = ((uint32_t)opa << 24) | ((uint32_t)bgcolor[0] << 16) | ((uint32_t)bgcolor[1] << 8) | (uint32_t)bgcolor[2];
             uint32_t* buf32 = (uint32_t*)gif->canvas;
             for(j = 0; j < gif->fh; j++) {
@@ -725,6 +784,7 @@ dispose(gd_GIF * gif)
                 i += gif->width;
                 if ((j & 0x0F) == 0) { GIFDEC_YIELD(); }
             }
+    #endif
 #endif
             break;
         case 3: /* Restore to previous, i.e., don't update canvas.*/
