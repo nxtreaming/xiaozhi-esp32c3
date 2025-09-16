@@ -5,6 +5,9 @@
 #include <lvgl.h>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /**
  * C++ implementation of LVGL GIF widget
@@ -83,14 +86,24 @@ private:
     uint32_t last_call_;
     
     // Animation state
-    bool playing_;
+    std::atomic<bool> playing_;
     bool loaded_;
     
     // Frame update callback
     std::function<void()> frame_callback_;
-    
+
+    // Background decoder task
+    TaskHandle_t decode_task_ = nullptr;
+
+    // Async callback executed in LVGL thread to notify frame updated
+    static void AsyncFrameCb(void* user_data);
+
+    // Task trampoline and loop
+    static void DecoderTaskTrampoline(void* arg);
+    void DecoderLoop();
+
     /**
-     * Update to next frame
+     * Update to next frame (kept for compatibility if needed)
      */
     void NextFrame();
     

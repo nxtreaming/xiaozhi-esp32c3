@@ -56,32 +56,26 @@ void LvglGif::Start() {
         return;
     }
 
-    if (!timer_) {
-        timer_ = lv_timer_create([](lv_timer_t* timer) {
-            LvglGif* gif_obj = static_cast<LvglGif*>(lv_timer_get_user_data(timer));
-            gif_obj->NextFrame();
-        }, 10, this);
+    playing_ = true;
+    last_call_ = lv_tick_get();
+
+    if (decode_task_ == nullptr) {
+        BaseType_t ok = xTaskCreate(
+            DecoderTaskTrampoline, "gif_decode", 4096, this, tskIDLE_PRIORITY + 2, &decode_task_);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create GIF decoder task");
+            decode_task_ = nullptr;
+            playing_ = false;
+            return;
+        }
     }
 
-    if (timer_) {
-        playing_ = true;
-        last_call_ = lv_tick_get();
-        lv_timer_resume(timer_);
-        lv_timer_reset(timer_);
-        
-        // Render first frame
-        NextFrame();
-        
-        ESP_LOGI(TAG, "GIF animation started");
-    }
+    ESP_LOGI(TAG, "GIF animation started (decoder task)");
 }
 
 void LvglGif::Pause() {
-    if (timer_) {
-        playing_ = false;
-        lv_timer_pause(timer_);
-        ESP_LOGI(TAG, "GIF animation paused");
-    }
+    playing_ = false;
+    ESP_LOGI(TAG, "GIF animation paused");
 }
 
 void LvglGif::Resume() {
@@ -89,23 +83,14 @@ void LvglGif::Resume() {
         ESP_LOGW(TAG, "GIF not loaded, cannot resume");
         return;
     }
-
-    if (timer_) {
-        playing_ = true;
-        lv_timer_resume(timer_);
-        ESP_LOGI(TAG, "GIF animation resumed");
-    }
+    playing_ = true;
+    ESP_LOGI(TAG, "GIF animation resumed");
 }
 
 void LvglGif::Stop() {
-    if (timer_) {
-        playing_ = false;
-        lv_timer_pause(timer_);
-    }
-
+    playing_ = false;
     if (gif_) {
         gd_rewind(gif_);
-        NextFrame();
         ESP_LOGI(TAG, "GIF animation stopped and rewound");
     }
 }
@@ -151,46 +136,68 @@ void LvglGif::SetFrameCallback(std::function<void()> callback) {
     frame_callback_ = callback;
 }
 
-void LvglGif::NextFrame() {
-    if (!loaded_ || !gif_ || !playing_) {
-        return;
-    }
-
-    // Check if enough time has passed for the next frame
-    uint32_t elapsed = lv_tick_elaps(last_call_);
-    // GIF delay is in hundredths of a second; clamp to a minimum to avoid 0-delay busy updates
-    uint32_t frame_ms = (uint32_t)gif_->gce.delay * 10u;
-    if (frame_ms < 20u) frame_ms = 20u; // minimum 20ms per frame to reduce CPU/WDT risk
-    if (elapsed < frame_ms) {
-        return;
-    }
-
-    last_call_ = lv_tick_get();
-
-    // Get next frame
-    int has_next = gd_get_frame(gif_);
-    if (has_next == 0) {
-        // Animation finished, pause timer
-        playing_ = false;
-        if (timer_) {
-            lv_timer_pause(timer_);
-        }
-        ESP_LOGI(TAG, "GIF animation completed");
-    }
-
-    // Render current frame
-    if (gif_->canvas) {
-        gd_render_frame(gif_, gif_->canvas);
-        
-        // Call frame callback if set
-        if (frame_callback_) {
-            frame_callback_();
-        }
+// Static
+void LvglGif::AsyncFrameCb(void* user_data) {
+    LvglGif* self = static_cast<LvglGif*>(user_data);
+    if (self && self->frame_callback_) {
+        self->frame_callback_();
     }
 }
 
+void LvglGif::DecoderTaskTrampoline(void* arg) {
+    LvglGif* self = static_cast<LvglGif*>(arg);
+    if (self) self->DecoderLoop();
+}
+
+void LvglGif::DecoderLoop() {
+    for (;;) {
+        if (decode_task_ == nullptr) {
+            vTaskDelete(nullptr);
+        }
+        if (!playing_ || !gif_) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        uint32_t elapsed = lv_tick_elaps(last_call_);
+        uint32_t frame_ms = (uint32_t)gif_->gce.delay * 10u;
+        if (frame_ms < 20u) frame_ms = 20u;
+        if (elapsed < frame_ms) {
+            vTaskDelay(pdMS_TO_TICKS(frame_ms - elapsed));
+            continue;
+        }
+        last_call_ = lv_tick_get();
+
+        // Decode next frame (heavy work off LVGL thread)
+        int has_next = gd_get_frame(gif_);
+        if (has_next == 0) {
+            playing_ = false;
+            continue;
+        }
+        if (gif_->canvas) {
+            gd_render_frame(gif_, gif_->canvas);
+            // Notify LVGL to refresh image in LVGL thread
+            lv_async_call(AsyncFrameCb, this);
+        }
+        taskYIELD();
+    }
+}
+
+void LvglGif::NextFrame() {
+    // Kept for compatibility but unused when decoder task is enabled
+    if (!loaded_ || !gif_) return;
+}
+
 void LvglGif::Cleanup() {
-    // Stop and delete timer
+    // Stop decoder task if running
+    playing_ = false;
+    if (decode_task_ != nullptr) {
+        TaskHandle_t t = decode_task_;
+        decode_task_ = nullptr;
+        vTaskDelete(t);
+    }
+
+    // Delete (unused) LVGL timer if any
     if (timer_) {
         lv_timer_delete(timer_);
         timer_ = nullptr;
@@ -202,7 +209,6 @@ void LvglGif::Cleanup() {
         gif_ = nullptr;
     }
 
-    playing_ = false;
     loaded_ = false;
     
     // Clear image descriptor
