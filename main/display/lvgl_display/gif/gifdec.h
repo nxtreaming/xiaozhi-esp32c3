@@ -14,6 +14,11 @@ extern "C" {
 #define GIFDEC_USE_RGB565 1
 #endif
 
+// Enable LZW decode working cache to improve performance (adds ~16KB per decoder instance)
+#ifndef LV_GIF_CACHE_DECODE_DATA
+#define LV_GIF_CACHE_DECODE_DATA 1
+#endif
+
 typedef struct _gd_Palette {
     int size;
     uint8_t colors[0x100 * 3];
