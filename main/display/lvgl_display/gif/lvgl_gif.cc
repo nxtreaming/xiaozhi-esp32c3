@@ -161,7 +161,7 @@ void LvglGif::DecoderLoop() {
 
         uint32_t elapsed = lv_tick_elaps(last_call_);
         uint32_t frame_ms = (uint32_t)gif_->gce.delay * 10u;
-        if (frame_ms < 20u) frame_ms = 20u;
+        if (frame_ms < 40u) frame_ms = 40u;
         if (elapsed < frame_ms) {
             vTaskDelay(pdMS_TO_TICKS(frame_ms - elapsed));
             continue;

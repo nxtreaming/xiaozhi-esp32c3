@@ -4,6 +4,13 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#ifndef GIFDEC_YIELD
+#define GIFDEC_YIELD() do { taskYIELD(); } while (0)
+#endif
+
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
@@ -117,13 +124,13 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
     if(0 == (INT_MAX - sizeof(gd_GIF) - LZW_CACHE_SIZE) / width / height / 5){
         LV_LOG_WARN("Image dimensions are too large");
         goto fail;
-    } 
+    }
     gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height + LZW_CACHE_SIZE);
 #else
     if(0 == (INT_MAX - sizeof(gd_GIF)) / width / height / 5){
         LV_LOG_WARN("Image dimensions are too large");
         goto fail;
-    } 
+    }
     gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height);
 #endif
     if(!gif) goto fail;
@@ -391,6 +398,7 @@ read_image_data(gd_GIF *gif, int interlace)
             }
             *ptr++ = *(--sp);
             frm_off += 1;
+            if ((frm_off & 0x3FFF) == 0) { GIFDEC_YIELD(); }
             /* read one line */
             if ((ptr - ptr_row_start) == gif->fw) {
                 if (interlace) {
@@ -610,6 +618,7 @@ read_image_data(gd_GIF * gif, int interlace)
                 entry = table->entries[entry.prefix];
         }
         frm_off += str_len;
+        if ((frm_off & 0x3FFF) == 0) { GIFDEC_YIELD(); }
         if(key < table->nentries - 1 && !table_is_full)
             table->entries[table->nentries - 1].suffix = entry.suffix;
     }
@@ -664,20 +673,28 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
                         gif->gce.transparency ? gif->gce.tindex : 0x100);
 #else
     int j, k;
-    uint8_t index, * color;
+    const uint8_t* pal = gif->palette->colors;
+    // Precompute ARGB8888 palette (memory order: BB,GG,RR,AA for little-endian)
+    uint32_t pal32[256];
+    int pcount = gif->palette->size;
+    for (int pi = 0; pi < pcount; ++pi) {
+        uint8_t r = pal[pi * 3 + 0];
+        uint8_t g = pal[pi * 3 + 1];
+        uint8_t b = pal[pi * 3 + 2];
+        pal32[pi] = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    }
+    uint32_t* buf32 = (uint32_t*)buffer;
 
     for(j = 0; j < gif->fh; j++) {
+        int row_base = (gif->fy + j) * gif->width + gif->fx;
         for(k = 0; k < gif->fw; k++) {
-            index = gif->frame[(gif->fy + j) * gif->width + gif->fx + k];
-            color = &gif->palette->colors[index * 3];
+            uint8_t index = gif->frame[row_base + k];
             if(!gif->gce.transparency || index != gif->gce.tindex) {
-                buffer[(i + k) * 4 + 0] = *(color + 2);
-                buffer[(i + k) * 4 + 1] = *(color + 1);
-                buffer[(i + k) * 4 + 2] = *(color + 0);
-                buffer[(i + k) * 4 + 3] = 0xFF;
+                buf32[i + k] = pal32[index];
             }
         }
         i += gif->width;
+        if ((j & 0x0F) == 0) { GIFDEC_YIELD(); }
     }
 #endif
 }
@@ -699,14 +716,14 @@ dispose(gd_GIF * gif)
             GIFDEC_FILL_BG(&(gif->canvas[i * 4]), gif->fw, gif->fh, gif->width, bgcolor, opa);
 #else
             int j, k;
+            uint32_t bg32 = ((uint32_t)opa << 24) | ((uint32_t)bgcolor[0] << 16) | ((uint32_t)bgcolor[1] << 8) | (uint32_t)bgcolor[2];
+            uint32_t* buf32 = (uint32_t*)gif->canvas;
             for(j = 0; j < gif->fh; j++) {
                 for(k = 0; k < gif->fw; k++) {
-                    gif->canvas[(i + k) * 4 + 0] = *(bgcolor + 2);
-                    gif->canvas[(i + k) * 4 + 1] = *(bgcolor + 1);
-                    gif->canvas[(i + k) * 4 + 2] = *(bgcolor + 0);
-                    gif->canvas[(i + k) * 4 + 3] = opa;
+                    buf32[i + k] = bg32;
                 }
                 i += gif->width;
+                if ((j & 0x0F) == 0) { GIFDEC_YIELD(); }
             }
 #endif
             break;
