@@ -11,6 +11,36 @@
 #define GIFDEC_YIELD() do { taskYIELD(); } while (0)
 #endif
 
+#if LV_GIF_PREFETCH_SUBBLOCKS
+typedef struct {
+    const uint8_t* data;
+    size_t size;
+    size_t byte_pos;
+    uint8_t bit_in_byte; /* 0..7 */
+} gif_bitreader_t;
+
+static inline uint16_t gif_br_get_key(gif_bitreader_t* br, int key_size) {
+    uint16_t key = 0;
+    int bits_read = 0;
+    while (bits_read < key_size) {
+        if (br->byte_pos >= br->size) {
+            return 0x1000; /* signal out-of-data similar to original get_key */
+        }
+        uint8_t byte = br->data[br->byte_pos];
+        int avail = 8 - br->bit_in_byte;
+        int take = (key_size - bits_read < avail) ? (key_size - bits_read) : avail;
+        key |= (uint16_t)(((byte >> br->bit_in_byte) & ((1u << take) - 1u)) << bits_read);
+        br->bit_in_byte += (uint8_t)take;
+        if (br->bit_in_byte == 8) {
+            br->bit_in_byte = 0;
+            br->byte_pos++;
+        }
+        bits_read += take;
+    }
+    return key;
+}
+#endif
+
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
@@ -389,6 +419,11 @@ read_image_data(gd_GIF *gif, int interlace)
     uint8_t *p_stack = NULL;
     uint8_t *p_suffix = NULL;
     uint16_t *p_prefix = NULL;
+#if LV_GIF_PREFETCH_SUBBLOCKS
+    uint8_t *comp_buf = NULL;
+    size_t comp_size = 0;
+    gif_bitreader_t br = {0};
+#endif
 
     /* get initial key size and clear code, stop code */
     f_gif_read(gif, &byte, 1);
@@ -401,6 +436,43 @@ read_image_data(gd_GIF *gif, int interlace)
     discard_sub_blocks(gif);
     end = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
     f_gif_seek(gif, start, LV_FS_SEEK_SET);
+
+#if LV_GIF_PREFETCH_SUBBLOCKS
+    /* Prefetch sub-blocks into contiguous buffer and prepare bitreader */
+    {
+        uint8_t blen;
+        size_t pos_saved = f_gif_seek(gif, 0, LV_FS_SEEK_CUR);
+        /* pass 1: compute total payload size */
+        comp_size = 0;
+        for (;;) {
+            f_gif_read(gif, &blen, 1);
+            if (blen == 0) break;
+            comp_size += blen;
+            f_gif_seek(gif, blen, LV_FS_SEEK_CUR);
+        }
+        if (comp_size > 0) {
+            comp_buf = lv_malloc(comp_size);
+            if (comp_buf) {
+                /* pass 2: copy payload */
+                f_gif_seek(gif, start, LV_FS_SEEK_SET);
+                size_t copied = 0;
+                for (;;) {
+                    f_gif_read(gif, &blen, 1);
+                    if (blen == 0) break;
+                    f_gif_read(gif, comp_buf + copied, blen);
+                    copied += blen;
+                }
+                br.data = comp_buf;
+                br.size = comp_size;
+                br.byte_pos = 0;
+                br.bit_in_byte = 0;
+            }
+        }
+        /* Move file pointer to end of sub-blocks regardless */
+        f_gif_seek(gif, end, LV_FS_SEEK_SET);
+        (void)pos_saved;
+    }
+#endif
 
     linesize = gif->width;
     ptr_base = &gif->frame[gif->fy * linesize + gif->fx];
@@ -428,7 +500,8 @@ read_image_data(gd_GIF *gif, int interlace)
         while (sp > p_stack) {
             if(frm_off >= frm_size){
                 LV_LOG_WARN("LZW table token overflows the frame buffer");
-                return -1;
+                ret = -1;
+                goto cleanup;
             }
             *ptr++ = *(--sp);
             frm_off += 1;
@@ -465,7 +538,11 @@ read_image_data(gd_GIF *gif, int interlace)
             }
         }
 
+#if LV_GIF_PREFETCH_SUBBLOCKS
+        key = (comp_buf ? gif_br_get_key(&br, curr_size) : get_key(gif, curr_size, &sub_len, &shift, &byte));
+#else
         key = get_key(gif, curr_size, &sub_len, &shift, &byte);
+#endif
 
         if (key == stop_code || key >= LZW_TABLE_SIZE)
             break;
@@ -512,9 +589,16 @@ read_image_data(gd_GIF *gif, int interlace)
         }
     }
 
+cleanup:
+#if LV_GIF_PREFETCH_SUBBLOCKS
+    if (comp_buf) lv_free(comp_buf);
+    f_gif_seek(gif, end, LV_FS_SEEK_SET);
+    return ret;
+#else
     if (key == stop_code) f_gif_read(gif, &sub_len, 1); /* Must be zero! */
     f_gif_seek(gif, end, LV_FS_SEEK_SET);
     return ret;
+#endif
 }
 #else
 static Table *
@@ -720,13 +804,10 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
 #if GIFDEC_USE_RGB565
     // Build RGB565 palette cache on demand
     if (gif->pal_dirty) {
-        int pcount_build = gif->palette->size;
-        const uint8_t* pal_build = gif->palette->colors;
-        for (int pi = 0; pi < pcount_build; ++pi) {
-            uint8_t r = pal_build[pi * 3 + 0];
-            uint8_t g = pal_build[pi * 3 + 1];
-            uint8_t b = pal_build[pi * 3 + 2];
-            gif->pal16_cache[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        const uint8_t* p = gif->palette->colors;
+        for (int idx = 0, n = gif->palette->size; idx < n; ++idx) {
+            uint8_t r = *p++, g = *p++, b = *p++;
+            gif->pal16_cache[idx] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         }
         gif->pal_dirty = 0;
     }
@@ -734,12 +815,10 @@ render_frame_rect(gd_GIF * gif, uint8_t * buffer)
 #else
     // Precompute ARGB8888 palette
     uint32_t pal32[256];
-    int pcount = gif->palette->size;
-    for (int pi = 0; pi < pcount; ++pi) {
-        uint8_t r = pal[pi * 3 + 0];
-        uint8_t g = pal[pi * 3 + 1];
-        uint8_t b = pal[pi * 3 + 2];
-        pal32[pi] = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    const uint8_t* p32 = pal;
+    for (int idx = 0, n = gif->palette->size; idx < n; ++idx) {
+        uint8_t r = *p32++, g = *p32++, b = *p32++;
+        pal32[idx] = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
     }
     uint32_t* buf32 = (uint32_t*)buffer;
 #endif
@@ -786,13 +865,10 @@ dispose(gd_GIF * gif)
     #if GIFDEC_USE_RGB565
             // Ensure palette cache is ready before using background color
             if (gif->pal_dirty) {
-                int pcount_build = gif->palette->size;
-                const uint8_t* pal_build = gif->palette->colors;
-                for (int pi = 0; pi < pcount_build; ++pi) {
-                    uint8_t r = pal_build[pi * 3 + 0];
-                    uint8_t g = pal_build[pi * 3 + 1];
-                    uint8_t b = pal_build[pi * 3 + 2];
-                    gif->pal16_cache[pi] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+                const uint8_t* p = gif->palette->colors;
+                for (int idx = 0, n = gif->palette->size; idx < n; ++idx) {
+                    uint8_t r = *p++, g = *p++, b = *p++;
+                    gif->pal16_cache[idx] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
                 }
                 gif->pal_dirty = 0;
             }

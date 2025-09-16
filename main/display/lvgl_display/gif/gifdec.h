@@ -19,6 +19,11 @@ extern "C" {
 #define LV_GIF_CACHE_DECODE_DATA 1
 #endif
 
+/* Prefetch compressed sub-blocks into RAM and decode from memory for speed */
+#ifndef LV_GIF_PREFETCH_SUBBLOCKS
+#define LV_GIF_PREFETCH_SUBBLOCKS 1
+#endif
+
 typedef struct _gd_Palette {
     int size;
     uint8_t colors[0x100 * 3];
