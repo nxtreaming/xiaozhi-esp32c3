@@ -19,6 +19,9 @@
 #include <esp_app_desc.h>
 #include <driver/uart.h>
 #include <esp_heap_caps.h>
+#include <esp_http_client.h>
+#include <esp_tls.h>
+#include <esp_crt_bundle.h>
 #include "YT_UART.h"
 #include "gif_test.h"
 #define TAG "Application"
@@ -545,7 +548,7 @@ void Application::Start()
                             background_task_->WaitForCompletion();
                             if (keep_listening_) {
                                 protocol_->SendStartListening(kListeningModeAutoStop);
-                                SetDeviceState(kDeviceStateListening); 
+                                SetDeviceState(kDeviceStateListening);
                             } else {
                                 SetDeviceState(kDeviceStateIdle);
                             }
@@ -636,7 +639,7 @@ void Application::Start()
                     wake_word_detect_.StartDetection();
                     return;
                 }
-                
+
                 std::vector<uint8_t> opus;
                 // Encode and send the wake word data to the server
                 while (wake_word_detect_.GetWakeWordOpus(opus)) {
@@ -821,7 +824,7 @@ void Application::OutputAudio()
             output_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
             pcm = std::move(resampled);
         }
-        
+
         codec->OutputData(pcm); });
 }
 
@@ -1046,7 +1049,7 @@ void Application::WakeWordInvoke(const std::string &wake_word)
         Schedule([this, wake_word]()
                  {
             if (protocol_) {
-                protocol_->SendWakeWordDetected(wake_word); 
+                protocol_->SendWakeWordDetected(wake_word);
             } });
     }
     else if (device_state_ == kDeviceStateSpeaking)
@@ -1199,6 +1202,129 @@ bool Application::IsGifPlaying() const
     return display ? display->IsGifPlaying() : false;
 }
 
+// Download a GIF into PSRAM buffer (no display). Caller must free *out_buf with heap_caps_free.
+static bool DownloadGifToPsram(const char* url, uint8_t** out_buf, size_t* out_len) {
+    if (!url || !out_buf || !out_len) return false;
+    *out_buf = nullptr;
+    *out_len = 0;
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.timeout_ms = 30000;
+    cfg.buffer_size = 4096;
+    cfg.buffer_size_tx = 1024;
+    if (strncmp(url, "https://", 8) == 0) {
+        cfg.use_global_ca_store = true;
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "Download init failed");
+        return false;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    // Fetch headers and get content length if provided
+    esp_http_client_fetch_headers(client);
+    int content_length = esp_http_client_get_content_length(client);
+    size_t cap = 512 * 1024; // default initial capacity
+    const size_t kMaxSize = 10 * 1024 * 1024; // 10MB cap
+    if (content_length > 0) {
+        cap = (size_t)content_length;
+        if (cap > kMaxSize) {
+            ESP_LOGE(TAG, "File too large: %d bytes", content_length);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+    }
+
+    uint8_t* buf = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE(TAG, "PSRAM alloc failed: %u bytes", (unsigned)cap);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    size_t pos = 0;
+    size_t last_progress = 0;
+    size_t last_yield_bytes = 0;
+    const size_t kYieldEvery = 64 * 1024;
+
+    while (true) {
+        int r = esp_http_client_read(client, (char*)buf + pos, 4096);
+        if (r < 0) {
+            ESP_LOGE(TAG, "HTTP read error: %d", r);
+            heap_caps_free(buf);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        if (r == 0) break; // done
+        pos += (size_t)r;
+
+        // Grow if needed for unknown content length
+        if (pos > cap) {
+            size_t new_cap = cap * 2;
+            if (new_cap < pos) new_cap = pos;
+            if (new_cap > kMaxSize) {
+                ESP_LOGE(TAG, "Download exceeds max cap (%u > %u)", (unsigned)new_cap, (unsigned)kMaxSize);
+                heap_caps_free(buf);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return false;
+            }
+            uint8_t* nb = (uint8_t*)heap_caps_realloc(buf, new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!nb) {
+                ESP_LOGE(TAG, "PSRAM realloc failed: %u bytes", (unsigned)new_cap);
+                heap_caps_free(buf);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return false;
+            }
+            buf = nb;
+            cap = new_cap;
+        }
+
+        // Progress (if content length known)
+        if (content_length > 0) {
+            size_t prog = (pos * 100) / (size_t)content_length;
+            if (prog >= last_progress + 20) {
+                ESP_LOGI(TAG, "Download progress: %u%% (%u/%u bytes)", (unsigned)prog, (unsigned)pos, (unsigned)content_length);
+                last_progress = prog;
+            }
+        }
+        // Yield periodically to feed WDT
+        if (pos - last_yield_bytes >= kYieldEvery) {
+            vTaskDelay(1);
+            last_yield_bytes = pos;
+        }
+    }
+
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (status != 200 || pos < 6 || !(memcmp(buf, "GIF87a", 6) == 0 || memcmp(buf, "GIF89a", 6) == 0)) {
+        ESP_LOGE(TAG, "Invalid HTTP status or not a GIF: status=%d, size=%u", status, (unsigned)pos);
+        heap_caps_free(buf);
+        return false;
+    }
+
+    *out_buf = buf;
+    *out_len = pos;
+    ESP_LOGI(TAG, "Downloaded GIF: %u bytes", (unsigned)pos);
+    return true;
+}
+
 bool Application::IsSlideShowRunning() const
 {
     return slideshow_running_.load();
@@ -1215,7 +1341,7 @@ void Application::SlideShow()
     slideshow_running_ = true;
 
     background_task_->Schedule([this]() {
-        // List of GIF URLs to show sequentially
+        // List of GIF URLs to preload, then display sequentially
         static const char* kGifUrls[] = {
             //"http://122.51.57.185:18080/test1.gif",
             //"http://122.51.57.185:18080/test2.gif",
@@ -1229,20 +1355,68 @@ void Application::SlideShow()
         constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
         constexpr int kDwellMs = 5000; // show each GIF ~5 seconds
 
-        ESP_LOGI(TAG, "SlideShow started (loop) (%d items)", kCount);
+        ESP_LOGI(TAG, "SlideShow started (preload + loop) (%d items)", kCount);
 
+        // Ensure no decoding during download phase
+        if (auto display = Board::GetInstance().GetDisplay()) {
+            display->HideGif();
+        }
+
+        struct PreGif { uint8_t* data; size_t size; const char* url; };
+        PreGif items[kCount];
+        for (int i = 0; i < kCount; ++i) {
+            items[i].data = nullptr;
+            items[i].size = 0;
+            items[i].url = kGifUrls[i];
+        }
+
+        int loaded = 0;
+        // Download all GIFs first (no decoding)
+        for (int i = 0; i < kCount && !stop_slideshow_; ++i) {
+            if (device_state_ != kDeviceStateIdle) {
+                ESP_LOGW(TAG, "Device not idle, abort SlideShow preload");
+                stop_slideshow_ = true;
+                break;
+            }
+            ESP_LOGI(TAG, "Pre-download %d/%d: %s", i + 1, kCount, kGifUrls[i]);
+            uint8_t* buf = nullptr; size_t len = 0;
+            if (DownloadGifToPsram(kGifUrls[i], &buf, &len)) {
+                items[loaded].data = buf;
+                items[loaded].size = len;
+                items[loaded].url  = kGifUrls[i];
+                ++loaded;
+            } else {
+                if (buf) heap_caps_free(buf);
+                ESP_LOGE(TAG, "Pre-download failed: %s", kGifUrls[i]);
+            }
+            vTaskDelay(1);
+        }
+
+        if (loaded == 0 || stop_slideshow_) {
+            ESP_LOGW(TAG, "No GIFs preloaded or slideshow stopped during preload");
+            if (auto display = Board::GetInstance().GetDisplay()) display->HideGif();
+            for (int i = 0; i < kCount; ++i) if (items[i].data) heap_caps_free(items[i].data);
+            stop_slideshow_ = false;
+            slideshow_running_ = false;
+            ESP_LOGI(TAG, "SlideShow finished");
+            return;
+        }
+
+        ESP_LOGI(TAG, "Pre-download completed: %d/%d", loaded, kCount);
+
+        // Display phase (no downloading)
         while (!stop_slideshow_) {
-            for (int i = 0; i < kCount && !stop_slideshow_; ++i) {
+            for (int i = 0; i < loaded && !stop_slideshow_; ++i) {
                 if (device_state_ != kDeviceStateIdle) {
-                    ESP_LOGW(TAG, "Device not idle, abort SlideShow");
+                    ESP_LOGW(TAG, "Device state changed, abort SlideShow");
                     stop_slideshow_ = true;
                     break;
                 }
-
-                ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", i + 1, kCount, kGifUrls[i]);
-                ShowGifFromUrl(kGifUrls[i], 0, 0);
-
-                // Wait for dwell time or until stopped/state changed
+                ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", i + 1, loaded, items[i].url);
+                if (auto display = Board::GetInstance().GetDisplay()) {
+                    display->ShowGif(items[i].data, items[i].size, 0, 0);
+                }
+                // dwell
                 int remaining = kDwellMs;
                 while (remaining > 0 && !stop_slideshow_) {
                     if (device_state_ != kDeviceStateIdle) {
@@ -1256,8 +1430,13 @@ void Application::SlideShow()
             }
         }
 
-        // Clean up display at the end
-        HideGif();
+        // Clean up display and free preloaded buffers
+        if (auto display = Board::GetInstance().GetDisplay())
+            display->HideGif();
+        for (int i = 0; i < loaded; ++i) {
+            if (items[i].data)
+                heap_caps_free(items[i].data);
+        }
         stop_slideshow_ = false;
         slideshow_running_ = false;
         ESP_LOGI(TAG, "SlideShow finished");

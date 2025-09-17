@@ -198,12 +198,18 @@ void LvglGif::NextFrame() {
 }
 
 void LvglGif::Cleanup() {
-    // Stop decoder task if running
+    // Request decoder task to stop and self-delete safely before freeing gif_
     playing_ = false;
     if (decode_task_ != nullptr) {
         TaskHandle_t t = decode_task_;
+        // Signal the task to exit by nulling the handle (DecoderLoop checks this)
         decode_task_ = nullptr;
-        vTaskDelete(t);
+        // Wait until the task actually deletes itself to avoid races with gd_* access
+        // Cap the wait to avoid infinite loop in pathological cases
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        while (eTaskGetState(t) != eDeleted && (xTaskGetTickCount() < deadline)) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     // Delete (unused) LVGL timer if any
@@ -212,14 +218,14 @@ void LvglGif::Cleanup() {
         timer_ = nullptr;
     }
 
-    // Close GIF decoder
+    // Close GIF decoder (after decoder task is gone)
     if (gif_) {
         gd_close_gif(gif_);
         gif_ = nullptr;
     }
 
     loaded_ = false;
-    
+
     // Clear image descriptor
     memset(&img_dsc_, 0, sizeof(img_dsc_));
 }
