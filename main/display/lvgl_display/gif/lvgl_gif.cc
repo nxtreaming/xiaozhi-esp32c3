@@ -1,6 +1,12 @@
 #include "lvgl_gif.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <cstring>
+#include "sdkconfig.h"
+
+// Forward declarations to avoid including esp_lvgl_port.h here
+extern "C" bool lvgl_port_lock(int timeout_ms);
+extern "C" void lvgl_port_unlock(void);
 
 #define TAG "LvglGif"
 
@@ -40,6 +46,8 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc)
     if (gif_->canvas) {
         gd_render_frame(gif_, gif_->canvas);
     }
+    // First frame is considered index 0
+    frame_index_ = 0;
 
     loaded_ = true;
     ESP_LOGI(TAG, "GIF loaded from image descriptor: %dx%d", gif_->width, gif_->height);
@@ -69,13 +77,57 @@ void LvglGif::Start() {
     last_call_ = lv_tick_get();
 
     if (decode_task_ == nullptr) {
-        BaseType_t ok = xTaskCreate(
-            DecoderTaskTrampoline, "gif_decode", 4096, this, tskIDLE_PRIORITY + 2, &decode_task_);
-        if (ok != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create GIF decoder task");
-            decode_task_ = nullptr;
-            playing_ = false;
-            return;
+#if CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+        // Prefer creating decoder task with its stack placed in PSRAM to save internal SRAM
+        const uint32_t desired_stack_words = 2048; // 8KB stack in PSRAM
+        decode_stack_words_ = desired_stack_words;
+        decode_stack_ = (StackType_t*)heap_caps_malloc(decode_stack_words_ * sizeof(StackType_t),
+                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        decode_tcb_ = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t),
+                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (decode_stack_ && decode_tcb_) {
+            // Create static task; if API with core pinning is unavailable, regular static create is fine
+            decode_task_ = xTaskCreateStatic(
+                DecoderTaskTrampoline,
+                "gif_decode",
+                decode_stack_words_,
+                this,
+                tskIDLE_PRIORITY + 2,
+                decode_stack_,
+                decode_tcb_);
+            if (decode_task_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create static GIF decoder task in PSRAM");
+                heap_caps_free(decode_stack_); decode_stack_ = nullptr; decode_stack_words_ = 0;
+                heap_caps_free(decode_tcb_);   decode_tcb_ = nullptr;
+            }
+        } else {
+            ESP_LOGW(TAG, "Alloc PSRAM for decoder stack/TCB failed: free_int=%u, free_psram=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            if (decode_stack_) { heap_caps_free(decode_stack_); decode_stack_ = nullptr; }
+            if (decode_tcb_)   { heap_caps_free(decode_tcb_);   decode_tcb_ = nullptr; }
+        }
+        if (decode_task_ == nullptr)
+#endif
+        {
+            // Fallback: try dynamic task in internal SRAM with decreasing stacks
+            const uint32_t stacks[] = {4096, 3072, 2560, 2048};
+            BaseType_t ok = pdFAIL;
+            for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]) && ok != pdPASS; ++i) {
+                ok = xTaskCreate(DecoderTaskTrampoline, "gif_decode", stacks[i], this,
+                                 tskIDLE_PRIORITY + 2, &decode_task_);
+                if (ok != pdPASS) {
+                    ESP_LOGW(TAG, "Create decoder task failed with stack=%u, free_int=%u",
+                             (unsigned)stacks[i],
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                }
+            }
+            if (ok != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create GIF decoder task after retries");
+                decode_task_ = nullptr;
+                playing_ = false;
+                return;
+            }
         }
     }
 
@@ -100,6 +152,7 @@ void LvglGif::Stop() {
     playing_ = false;
     if (gif_) {
         gd_rewind(gif_);
+        frame_index_ = 0; // reset frame index on rewind
         ESP_LOGI(TAG, "GIF animation stopped and rewound");
     }
 }
@@ -169,8 +222,9 @@ void LvglGif::DecoderLoop() {
         }
 
         uint32_t elapsed = lv_tick_elaps(last_call_);
-        uint32_t frame_ms = (uint32_t)gif_->gce.delay * 10u;
-        if (frame_ms < 40u) frame_ms = 40u;
+        uint32_t orig_ms = (uint32_t)gif_->gce.delay * 10u;
+        bool high_fps = (orig_ms > 0u && orig_ms < 50u); // >20 fps
+        uint32_t frame_ms = high_fps ? 50u : (orig_ms < 40u ? 40u : orig_ms);
         if (elapsed < frame_ms) {
             vTaskDelay(pdMS_TO_TICKS(frame_ms - elapsed));
             continue;
@@ -183,10 +237,18 @@ void LvglGif::DecoderLoop() {
             playing_ = false;
             continue;
         }
+        // Increase decoded frame index (first decoded after ctor's initial render is 1)
+        frame_index_++;
+
         if (gif_->canvas) {
+            // Always render to keep disposal/composition correct
             gd_render_frame(gif_, gif_->canvas);
-            // Notify LVGL to refresh image in LVGL thread
-            lv_async_call(AsyncFrameCb, this);
+            // Only display odd frames when original FPS > 20 (i.e., orig_ms < 50)
+            if (!high_fps || (frame_index_ & 1u)) {
+                if (frame_callback_) {
+                    lv_async_call(LvglGif::AsyncFrameCb, this);
+                }
+            }
         }
         taskYIELD();
     }
@@ -198,8 +260,16 @@ void LvglGif::NextFrame() {
 }
 
 void LvglGif::Cleanup() {
-    // Request decoder task to stop and self-delete safely before freeing gif_
+    // Stop playing ASAP to prevent new frame schedules
     playing_ = false;
+
+    // Cancel any pending async callbacks that reference this object
+    // Call in a loop to ensure all queued timers are removed
+    while (lv_async_call_cancel(LvglGif::AsyncFrameCb, this) == LV_RESULT_OK) {
+        // keep cancelling until none left
+    }
+
+    // Request decoder task to stop and self-delete safely before freeing gif_
     if (decode_task_ != nullptr) {
         TaskHandle_t t = decode_task_;
         // Signal the task to exit by nulling the handle (DecoderLoop checks this)
@@ -211,6 +281,14 @@ void LvglGif::Cleanup() {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
+
+    // Double-check: cancel any stragglers after the task has stopped
+    while (lv_async_call_cancel(LvglGif::AsyncFrameCb, this) == LV_RESULT_OK) {
+    }
+
+    // Free static task resources if allocated
+    if (decode_stack_) { heap_caps_free(decode_stack_); decode_stack_ = nullptr; decode_stack_words_ = 0; }
+    if (decode_tcb_)   { heap_caps_free(decode_tcb_);   decode_tcb_ = nullptr; }
 
     // Delete (unused) LVGL timer if any
     if (timer_) {

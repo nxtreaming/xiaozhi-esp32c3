@@ -110,19 +110,44 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority = 1;
-    // Use safe default LVGL task stack to avoid stack overflow on first refresh
+    // Restore safer LVGL task stack to avoid overflow at startup
     port_cfg.task_stack = 6144;
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD screen");
+    // Choose multi-line buffer in internal DMA memory (~3–4KB target for SPI) and enable double buffer
+    const uint32_t bytes_per_line_spi = static_cast<uint32_t>(width_) * 2u;
+    uint32_t lines_spi = (4u * 1024u) / (bytes_per_line_spi ? bytes_per_line_spi : 1u);
+    if (lines_spi < 4u) lines_spi = 4u;       // at least 4 lines to reduce flush blocking
+    if (lines_spi > 16u) lines_spi = 16u;     // cap to reasonable upper bound
+    const uint32_t buffer_size_spi = bytes_per_line_spi * lines_spi;
+    // Adjust by internal RAM availability to keep headroom for tasks
+    size_t free_int_spi = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t kReserveForTasks = 20 * 1024; // leave headroom for decoder task etc.
+    bool use_spiram_buf_spi = false;
+    uint32_t chosen_buffer_size_spi = buffer_size_spi;
+    if (free_int_spi <= (kReserveForTasks + bytes_per_line_spi * 2u)) {
+        use_spiram_buf_spi = true; // not enough headroom for 2 lines
+    } else {
+        size_t max_for_buf = free_int_spi - kReserveForTasks;
+        uint32_t max_rounded = (uint32_t)(max_for_buf / bytes_per_line_spi) * bytes_per_line_spi;
+        if (max_rounded < chosen_buffer_size_spi) chosen_buffer_size_spi = max_rounded;
+        if (chosen_buffer_size_spi < bytes_per_line_spi * 2u) {
+            use_spiram_buf_spi = true; // fallback if too small
+            chosen_buffer_size_spi = buffer_size_spi; // keep multi-line size but in PSRAM
+        }
+    }
+
+    (void)use_spiram_buf_spi;  // silence unused warning when forcing PSRAM buffer
+
+
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        // Reduce draw buffer to lower internal RAM usage
-        // Further reduce draw buffer to ease internal RAM pressure
-        .buffer_size = static_cast<uint32_t>(width_ * 2),
-        .double_buffer = false,
+        .buffer_size = chosen_buffer_size_spi,
+        .double_buffer = true,
+        // SPI path: keep draw buffer in internal DMA memory, no trans buffer needed
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
         .vres = static_cast<uint32_t>(height_),
@@ -135,8 +160,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags = {
             .buff_dma = 1,
-            // Place LVGL draw buffer in PSRAM when available
-            .buff_spiram = 1,
+            // Use internal DMA-capable draw buffer for SPI for reliable flush
+            .buff_spiram = 0,
             .sw_rotate = 0,
             .swap_bytes = 1,
             .full_refresh = 0,
@@ -187,13 +212,39 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     port_cfg.task_priority = 1;
     lvgl_port_init(&port_cfg);
 
+    // Choose multi-line single buffer in internal DMA memory (~14KB target)
+    const uint32_t bytes_per_line_rgb = static_cast<uint32_t>(width_) * 2u;
+    uint32_t lines_rgb = (14u * 1024u) / (bytes_per_line_rgb ? bytes_per_line_rgb : 1u);
+    if (lines_rgb < 4u) lines_rgb = 4u;
+    if (lines_rgb > 24u) lines_rgb = 24u;
+    const uint32_t buffer_size_rgb = bytes_per_line_rgb * lines_rgb;
+    // Adjust by internal RAM availability to keep headroom for tasks
+    size_t free_int_rgb = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t kReserveForTasksRgb = 20 * 1024;
+    bool use_spiram_buf_rgb = false;
+    uint32_t chosen_buffer_size_rgb = buffer_size_rgb;
+    if (free_int_rgb <= (kReserveForTasksRgb + bytes_per_line_rgb * 2u)) {
+        use_spiram_buf_rgb = true;
+    } else {
+        size_t max_for_buf = free_int_rgb - kReserveForTasksRgb;
+        uint32_t max_rounded = (uint32_t)(max_for_buf / bytes_per_line_rgb) * bytes_per_line_rgb;
+        if (max_rounded < chosen_buffer_size_rgb) chosen_buffer_size_rgb = max_rounded;
+        if (chosen_buffer_size_rgb < bytes_per_line_rgb * 2u) {
+            use_spiram_buf_rgb = true;
+            chosen_buffer_size_rgb = buffer_size_rgb;
+        }
+    }
+
+    (void)use_spiram_buf_rgb;  // silence unused warning when forcing PSRAM buffer
+
+
     ESP_LOGI(TAG, "Adding LCD screen");
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         // Reduce draw buffer to lower internal RAM usage
         // Further reduce draw buffer to ease internal RAM pressure
-        .buffer_size = static_cast<uint32_t>(width_ * 2),
+        .buffer_size = chosen_buffer_size_rgb,
         // Disable double buffering to save memory on tight systems
         .double_buffer = false,
         .hres = static_cast<uint32_t>(width_),
@@ -204,8 +255,8 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
             .mirror_y = mirror_y,
         },
         .flags = {
-            .buff_dma = 1,
-            // Place LVGL draw buffer in PSRAM when available
+            .buff_dma = 0,
+            // Force LVGL draw buffer to PSRAM to minimize internal SRAM usage
             .buff_spiram = 1,
             .swap_bytes = 0,
             // Re-enable full_refresh/direct_mode to reduce intermediate copies
@@ -1127,8 +1178,32 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
 }
 
 void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y) {
-    DisplayLockGuard lock(this);
+    // Execute LVGL operations on LVGL task to avoid cross-thread mutex issues
+    struct Ctx { LcdDisplay* self; const uint8_t* data; size_t size; int x; int y; SemaphoreHandle_t done; };
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) {
+        ESP_LOGE(TAG, "ShowGif: failed to create semaphore");
+        return;
+    }
+    Ctx* ctx = (Ctx*)heap_caps_malloc(sizeof(Ctx), MALLOC_CAP_INTERNAL);
+    if (!ctx) {
+        ESP_LOGE(TAG, "ShowGif: failed to alloc ctx");
+        vSemaphoreDelete(done);
+        return;
+    }
+    ctx->self = this; ctx->data = gif_data; ctx->size = gif_size; ctx->x = x; ctx->y = y; ctx->done = done;
+    auto async_cb = [](void* p){
+        Ctx* c = (Ctx*)p;
+        c->self->ShowGifImpl_(c->data, c->size, c->x, c->y);
+        xSemaphoreGive(c->done);
+        heap_caps_free(c);
+    };
+    lv_async_call(async_cb, ctx);
+    (void)xSemaphoreTake(done, pdMS_TO_TICKS(5000));
+    vSemaphoreDelete(done);
+}
 
+void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, int y) {
     ESP_LOGI(TAG, "Attempting to show GIF at position (%d, %d), size: %lu bytes", x, y, (unsigned long)gif_size);
 
     if (!gif_data || gif_size == 0) {
@@ -1194,10 +1269,25 @@ void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y)
 }
 
 void LcdDisplay::HideGif() {
-    DisplayLockGuard lock(this);
+    struct Ctx { LcdDisplay* self; SemaphoreHandle_t done; };
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) { ESP_LOGE(TAG, "HideGif: failed to create semaphore"); return; }
+    Ctx* ctx = (Ctx*)heap_caps_malloc(sizeof(Ctx), MALLOC_CAP_INTERNAL);
+    if (!ctx) { vSemaphoreDelete(done); ESP_LOGE(TAG, "HideGif: failed to alloc ctx"); return; }
+    ctx->self = this; ctx->done = done;
+    auto async_cb = [](void* p){
+        Ctx* c = (Ctx*)p;
+        c->self->HideGifImpl_();
+        xSemaphoreGive(c->done);
+        heap_caps_free(c);
+    };
+    lv_async_call(async_cb, ctx);
+    (void)xSemaphoreTake(done, pdMS_TO_TICKS(2000));
+    vSemaphoreDelete(done);
+}
 
+void LcdDisplay::HideGifImpl_() {
     // Pause + hide only; keep controller and lv_image to avoid re-alloc each cycle
-    // Pause controller while hidden to avoid CPU overload and watchdog
     if (gif_controller_) {
         gif_controller_->Pause();
     }

@@ -23,7 +23,8 @@ Display::Display() {
     esp_timer_create_args_t notification_timer_args = {
         .callback = [](void *arg) {
             Display *display = static_cast<Display*>(arg);
-            DisplayLockGuard lock(display);
+            DisplayLockGuard guard(display);
+            if (!guard.locked()) return;
             lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
         },
@@ -82,8 +83,8 @@ Display::~Display() {
 }
 
 void Display::SetStatus(const char* status) {
-    DisplayLockGuard lock(this);
-    if (status_label_ == nullptr) {
+    DisplayLockGuard guard(this);
+    if (!guard.locked() || status_label_ == nullptr) {
         return;
     }
     lv_label_set_text(status_label_, status);
@@ -96,8 +97,8 @@ void Display::ShowNotification(const std::string &notification, int duration_ms)
 }
 
 void Display::ShowNotification(const char* notification, int duration_ms) {
-    DisplayLockGuard lock(this);
-    if (notification_label_ == nullptr) {
+    DisplayLockGuard guard(this);
+    if (!guard.locked() || notification_label_ == nullptr) {
         return;
     }
     lv_label_set_text(notification_label_, notification);
@@ -109,12 +110,17 @@ void Display::ShowNotification(const char* notification, int duration_ms) {
 }
 
 void Display::Update() {
+    // Avoid touching LVGL from esp_timer thread while GIF is playing.
+    // The GIF controller already invalidates objects from the LVGL task context.
+    if (IsGifPlaying()) {
+        return;
+    }
     auto& board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
 
     {
-        DisplayLockGuard lock(this);
-        if (mute_label_ == nullptr) {
+        DisplayLockGuard guard(this);
+        if (!guard.locked() || mute_label_ == nullptr) {
             return;
         }
 
@@ -147,8 +153,8 @@ void Display::Update() {
             };
             icon = levels[battery_level / 20];
         }
-        DisplayLockGuard lock(this);
-        if (battery_label_ != nullptr && battery_icon_ != icon) {
+        DisplayLockGuard guard(this);
+        if (guard.locked() && battery_label_ != nullptr && battery_icon_ != icon) {
             battery_icon_ = icon;
             lv_label_set_text(battery_label_, battery_icon_);
         }
@@ -180,9 +186,11 @@ void Display::Update() {
     if (std::find(allowed_states.begin(), allowed_states.end(), device_state) != allowed_states.end()) {
         icon = board.GetNetworkStateIcon();
         if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
-            DisplayLockGuard lock(this);
-            network_icon_ = icon;
-            lv_label_set_text(network_label_, network_icon_);
+            DisplayLockGuard guard(this);
+            if (guard.locked()) {
+                network_icon_ = icon;
+                lv_label_set_text(network_label_, network_icon_);
+            }
         }
     }
 

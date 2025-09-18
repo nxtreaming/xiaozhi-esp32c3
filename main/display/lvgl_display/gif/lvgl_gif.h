@@ -84,16 +84,23 @@ private:
     
     // Last frame update time
     uint32_t last_call_;
-    
+
+    // Decoded frame index (first displayed frame rendered in ctor is index 0)
+    uint32_t frame_index_ = 0;
+
     // Animation state
     std::atomic<bool> playing_;
     bool loaded_;
-    
+
     // Frame update callback
     std::function<void()> frame_callback_;
 
     // Background decoder task
     TaskHandle_t decode_task_ = nullptr;
+    // Optional static task resources (prefer PSRAM if allowed)
+    StaticTask_t* decode_tcb_ = nullptr;
+    StackType_t* decode_stack_ = nullptr; // in words
+    uint32_t decode_stack_words_ = 0;
 
     // Async callback executed in LVGL thread to notify frame updated
     static void AsyncFrameCb(void* user_data);

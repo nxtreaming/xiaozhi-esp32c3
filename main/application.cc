@@ -1208,121 +1208,129 @@ static bool DownloadGifToPsram(const char* url, uint8_t** out_buf, size_t* out_l
     *out_buf = nullptr;
     *out_len = 0;
 
-    esp_http_client_config_t cfg = {};
-    cfg.url = url;
-    cfg.timeout_ms = 30000;
-    cfg.buffer_size = 4096;
-    cfg.buffer_size_tx = 1024;
-    if (strncmp(url, "https://", 8) == 0) {
-        cfg.use_global_ca_store = true;
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    }
+    const int kMaxRetries = 2;           // restart whole download up to 2 times
+    const size_t kDefaultCap = 512 * 1024;
+    const size_t kMaxSize   = 10 * 1024 * 1024; // 10MB cap
+    const int kRxChunk = 16384;                 // read chunk goes directly into PSRAM dest buffer
 
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-        ESP_LOGE(TAG, "Download init failed");
-        return false;
-    }
+    for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+        esp_http_client_config_t cfg = {};
+        cfg.url = url;
+        cfg.timeout_ms = 60000;          // increase socket timeout
+        // Keep esp_http_client internal RX buffer small to save SRAM; data goes to PSRAM via read()
+        cfg.buffer_size = 2048;          // small header/parse buffer in SRAM
+        cfg.buffer_size_tx = 2048;
+        cfg.keep_alive_enable = false;   // avoid keep-alive surprises on some servers
+        if (strncmp(url, "https://", 8) == 0) {
+            cfg.use_global_ca_store = true;
+            cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        }
 
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return false;
-    }
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) {
+            ESP_LOGE(TAG, "Download init failed (attempt %d)", attempt + 1);
+            continue;
+        }
 
-    // Fetch headers and get content length if provided
-    esp_http_client_fetch_headers(client);
-    int content_length = esp_http_client_get_content_length(client);
-    size_t cap = 512 * 1024; // default initial capacity
-    const size_t kMaxSize = 10 * 1024 * 1024; // 10MB cap
-    if (content_length > 0) {
-        cap = (size_t)content_length;
-        if (cap > kMaxSize) {
-            ESP_LOGE(TAG, "File too large: %d bytes", content_length);
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "HTTP open failed: %s (attempt %d)", esp_err_to_name(err), attempt + 1);
+            esp_http_client_cleanup(client);
+            continue;
+        }
+
+        // Fetch headers and get content length if provided
+        esp_http_client_fetch_headers(client);
+        int content_length = esp_http_client_get_content_length(client);
+        size_t cap = kDefaultCap;
+        if (content_length > 0) {
+            cap = (size_t)content_length;
+            if (cap > kMaxSize) {
+                ESP_LOGE(TAG, "File too large: %d bytes", content_length);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return false;
+            }
+        }
+
+        uint8_t* buf = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!buf) {
+            ESP_LOGE(TAG, "PSRAM alloc failed: %u bytes", (unsigned)cap);
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return false;
         }
-    }
 
-    uint8_t* buf = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        ESP_LOGE(TAG, "PSRAM alloc failed: %u bytes", (unsigned)cap);
+        size_t pos = 0;
+        size_t last_progress = 0;
+        size_t last_yield_bytes = 0;
+        const size_t kYieldEvery = 64 * 1024;
+
+        bool ok = true;
+        while (true) {
+            int r = esp_http_client_read(client, (char*)buf + pos, kRxChunk);
+            if (r < 0) {
+                ESP_LOGE(TAG, "HTTP read error: %d (attempt %d)", r, attempt + 1);
+                ok = false;
+                break;
+            }
+            if (r == 0) break; // done
+            pos += (size_t)r;
+
+            // Grow if needed for unknown content length
+            if (pos > cap) {
+                size_t new_cap = cap * 2;
+                if (new_cap < pos) new_cap = pos;
+                if (new_cap > kMaxSize) {
+                    ESP_LOGE(TAG, "Download exceeds max cap (%u > %u)", (unsigned)new_cap, (unsigned)kMaxSize);
+                    ok = false;
+                    break;
+                }
+                uint8_t* nb = (uint8_t*)heap_caps_realloc(buf, new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!nb) {
+                    ESP_LOGE(TAG, "PSRAM realloc failed: %u bytes", (unsigned)new_cap);
+                    ok = false;
+                    break;
+                }
+                buf = nb;
+                cap = new_cap;
+            }
+
+            // Progress (if content length known)
+            if (content_length > 0) {
+                size_t prog = (pos * 100) / (size_t)content_length;
+                if (prog >= last_progress + 20) {
+                    ESP_LOGI(TAG, "Download progress: %u%% (%u/%u bytes)", (unsigned)prog, (unsigned)pos, (unsigned)content_length);
+                    last_progress = prog;
+                }
+            }
+            // Yield periodically to feed WDT
+            if (pos - last_yield_bytes >= kYieldEvery) {
+                vTaskDelay(1);
+                last_yield_bytes = pos;
+            }
+        }
+
+        int status = esp_http_client_get_status_code(client);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return false;
-    }
 
-    size_t pos = 0;
-    size_t last_progress = 0;
-    size_t last_yield_bytes = 0;
-    const size_t kYieldEvery = 64 * 1024;
-
-    while (true) {
-        int r = esp_http_client_read(client, (char*)buf + pos, 4096);
-        if (r < 0) {
-            ESP_LOGE(TAG, "HTTP read error: %d", r);
-            heap_caps_free(buf);
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            return false;
-        }
-        if (r == 0) break; // done
-        pos += (size_t)r;
-
-        // Grow if needed for unknown content length
-        if (pos > cap) {
-            size_t new_cap = cap * 2;
-            if (new_cap < pos) new_cap = pos;
-            if (new_cap > kMaxSize) {
-                ESP_LOGE(TAG, "Download exceeds max cap (%u > %u)", (unsigned)new_cap, (unsigned)kMaxSize);
-                heap_caps_free(buf);
-                esp_http_client_close(client);
-                esp_http_client_cleanup(client);
-                return false;
-            }
-            uint8_t* nb = (uint8_t*)heap_caps_realloc(buf, new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!nb) {
-                ESP_LOGE(TAG, "PSRAM realloc failed: %u bytes", (unsigned)new_cap);
-                heap_caps_free(buf);
-                esp_http_client_close(client);
-                esp_http_client_cleanup(client);
-                return false;
-            }
-            buf = nb;
-            cap = new_cap;
+        if (ok && (status == 200 || status == 206) && pos >= 6 && (memcmp(buf, "GIF87a", 6) == 0 || memcmp(buf, "GIF89a", 6) == 0)) {
+            *out_buf = buf;
+            *out_len = pos;
+            ESP_LOGI(TAG, "Downloaded GIF: %u bytes", (unsigned)pos);
+            return true;
         }
 
-        // Progress (if content length known)
-        if (content_length > 0) {
-            size_t prog = (pos * 100) / (size_t)content_length;
-            if (prog >= last_progress + 20) {
-                ESP_LOGI(TAG, "Download progress: %u%% (%u/%u bytes)", (unsigned)prog, (unsigned)pos, (unsigned)content_length);
-                last_progress = prog;
-            }
-        }
-        // Yield periodically to feed WDT
-        if (pos - last_yield_bytes >= kYieldEvery) {
-            vTaskDelay(1);
-            last_yield_bytes = pos;
-        }
-    }
-
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    if (status != 200 || pos < 6 || !(memcmp(buf, "GIF87a", 6) == 0 || memcmp(buf, "GIF89a", 6) == 0)) {
-        ESP_LOGE(TAG, "Invalid HTTP status or not a GIF: status=%d, size=%u", status, (unsigned)pos);
+        // failure path
+        ESP_LOGE(TAG, "Download failed: status=%d, size=%u (attempt %d)", status, (unsigned)pos, attempt + 1);
         heap_caps_free(buf);
-        return false;
+        if (attempt < kMaxRetries) {
+            vTaskDelay(pdMS_TO_TICKS(500 * (attempt + 1))); // backoff before retry
+        }
     }
 
-    *out_buf = buf;
-    *out_len = pos;
-    ESP_LOGI(TAG, "Downloaded GIF: %u bytes", (unsigned)pos);
-    return true;
+    return false;
 }
 
 bool Application::IsSlideShowRunning() const
@@ -1345,12 +1353,12 @@ void Application::SlideShow()
         static const char* kGifUrls[] = {
             //"http://122.51.57.185:18080/test1.gif",
             //"http://122.51.57.185:18080/test2.gif",
-            "http://122.51.57.185:18080/test3.gif",
+            //"http://122.51.57.185:18080/test3.gif",
             "http://122.51.57.185:18080/412_Normal.gif",
-            //"http://122.51.57.185:18080/412_think.gif",
-            //"http://122.51.57.185:18080/412_angry.gif",
-            "http://122.51.57.185:18080/412_cheer.gif"
-            //"http://122.51.57.185:18080/412_sadly.gif"
+            "http://122.51.57.185:18080/412_think.gif",
+            "http://122.51.57.185:18080/412_angry.gif",
+            "http://122.51.57.185:18080/412_cheer.gif",
+            "http://122.51.57.185:18080/412_sadly.gif"
         };
         constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
         constexpr int kDwellMs = 5000; // show each GIF ~5 seconds

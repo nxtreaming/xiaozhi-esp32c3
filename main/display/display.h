@@ -81,17 +81,23 @@ protected:
 
 class DisplayLockGuard {
 public:
-    DisplayLockGuard(Display *display) : display_(display) {
-        if (!display_->Lock(3000)) {
+    explicit DisplayLockGuard(Display *display) : display_(display) {
+        locked_ = display_ && display_->Lock(3000);
+        if (!locked_) {
             ESP_LOGE("Display", "Failed to lock display");
         }
     }
     ~DisplayLockGuard() {
-        display_->Unlock();
+        if (locked_) {
+            display_->Unlock();
+        }
     }
+
+    bool locked() const { return locked_; }
 
 private:
     Display *display_;
+    bool locked_ = false;
 };
 
 class NoDisplay : public Display {

@@ -79,6 +79,10 @@ private:
     void ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
     // Helper: center or position GIF based on x,y (0,0 means center)
     void SetGifPos(int x, int y);
+
+    // Run on LVGL task context implementations
+    void ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, int y);
+    void HideGifImpl_();
 };
 
 // RGB LCD显示器
