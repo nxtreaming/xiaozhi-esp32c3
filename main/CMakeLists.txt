@@ -141,6 +141,15 @@ file(GLOB BOARD_SOURCES
 )
 list(APPEND SOURCES ${BOARD_SOURCES})
 
+# Ensure SPD2010 touch driver is compiled for the esp32-s3-touch-lcd-1.46 board
+if(BOARD_TYPE STREQUAL "esp32-s3-touch-lcd-1.46")
+    list(APPEND SOURCES "boards/esp32-s3-touch-lcd-1.46/touch_spd2010.cc")
+    list(APPEND SOURCES "boards/esp32-s3-touch-lcd-1.46/vendor_touch.c")
+endif()
+
+# Deduplicate in case file was also captured by GLOB
+list(REMOVE_DUPLICATES SOURCES)
+
 if(CONFIG_CONNECTION_TYPE_MQTT_UDP)
     list(APPEND SOURCES "protocols/mqtt_protocol.cc")
 elseif(CONFIG_CONNECTION_TYPE_WEBSOCKET)

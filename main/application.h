@@ -211,6 +211,9 @@ public:
     // GIF slideshow
     void SlideShow();
     void StopSlideShow();
+    // Control slideshow manually (e.g., touch gestures)
+    void SlideShowNext();
+    void SlideShowPrev();
 
 private:
     Application();
@@ -260,6 +263,8 @@ private:
     void ShowActivationCode();
     void OnClockTimer();
     
+    // SlideShow control flags and hints
+    std::atomic<int> slideshow_skip_{0}; // -1 prev, 0 none, +1 next
 };
 
 enum{

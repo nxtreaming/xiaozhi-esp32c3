@@ -661,11 +661,13 @@ void Application::Start()
     SetDeviceState(kDeviceStateIdle);  //xkDeviceStateIdle
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
-    // 系统启动完成后，延迟3秒启动幻灯片
+    // 启动完成后默认开启幻灯片，确保有 GIF 显示
     background_task_->Schedule([this]() {
-        vTaskDelay(pdMS_TO_TICKS(3000));  // 等待3秒让系统稳定
-        ESP_LOGI(TAG, "System startup complete, starting SlideShow");
-        SlideShow();
+        vTaskDelay(pdMS_TO_TICKS(3000));  // 等待系统稳定
+        if (device_state_ == kDeviceStateIdle && !IsSlideShowRunning()) {
+            ESP_LOGI(TAG, "System startup complete, starting SlideShow");
+            SlideShow();
+        }
     });
     // }
 }
@@ -1338,6 +1340,22 @@ bool Application::IsSlideShowRunning() const
     return slideshow_running_.load();
 }
 
+void Application::SlideShowNext()
+{
+    if (IsSlideShowRunning()) {
+        slideshow_skip_.store(1);
+        ESP_LOGI(TAG, "SlideShowNext requested by gesture");
+    }
+}
+
+void Application::SlideShowPrev()
+{
+    if (IsSlideShowRunning()) {
+        slideshow_skip_.store(-1);
+        ESP_LOGI(TAG, "SlideShowPrev requested by gesture");
+    }
+}
+
 void Application::SlideShow()
 {
     // Prevent concurrent slideshows
@@ -1354,14 +1372,14 @@ void Application::SlideShow()
             //"http://122.51.57.185:18080/test1.gif",
             //"http://122.51.57.185:18080/test2.gif",
             //"http://122.51.57.185:18080/test3.gif",
-            "http://122.51.57.185:18080/412_Normal.gif",
-            "http://122.51.57.185:18080/412_think.gif",
-            "http://122.51.57.185:18080/412_angry.gif",
+            "http://122.51.57.185:18080/huahua-1.gif",
+            //"http://122.51.57.185:18080/412_Normal.gif",
+            //"http://122.51.57.185:18080/412_think.gif",
+            //"http://122.51.57.185:18080/412_angry.gif",
             "http://122.51.57.185:18080/412_cheer.gif",
             "http://122.51.57.185:18080/412_sadly.gif"
         };
         constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
-        constexpr int kDwellMs = 5000; // show each GIF ~5 seconds
 
         ESP_LOGI(TAG, "SlideShow started (preload + loop) (%d items)", kCount);
 
@@ -1413,29 +1431,45 @@ void Application::SlideShow()
         ESP_LOGI(TAG, "Pre-download completed: %d/%d", loaded, kCount);
 
         // Display phase (no downloading)
+        int index = 0;
         while (!stop_slideshow_) {
-            for (int i = 0; i < loaded && !stop_slideshow_; ++i) {
+            if (device_state_ != kDeviceStateIdle) {
+                ESP_LOGW(TAG, "Device state changed, abort SlideShow");
+                stop_slideshow_ = true;
+                break;
+            }
+            // Normalize index
+            if (index < 0) index = (loaded - 1);
+            if (index >= loaded) index = 0;
+
+            ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", index + 1, loaded, items[index].url);
+            if (auto display = Board::GetInstance().GetDisplay()) {
+                display->ShowGif(items[index].data, items[index].size, 0, 0);
+            }
+            // wait until current GIF finishes (plays 2 loops) or user skips
+            while (!stop_slideshow_) {
                 if (device_state_ != kDeviceStateIdle) {
                     ESP_LOGW(TAG, "Device state changed, abort SlideShow");
                     stop_slideshow_ = true;
                     break;
                 }
-                ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", i + 1, loaded, items[i].url);
-                if (auto display = Board::GetInstance().GetDisplay()) {
-                    display->ShowGif(items[i].data, items[i].size, 0, 0);
+                int skip = slideshow_skip_.exchange(0);
+                if (skip != 0) {
+                    index += skip; // -1 prev, +1 next
+                    goto next_item;
                 }
-                // dwell
-                int remaining = kDwellMs;
-                while (remaining > 0 && !stop_slideshow_) {
-                    if (device_state_ != kDeviceStateIdle) {
-                        ESP_LOGW(TAG, "Device state changed, abort SlideShow");
-                        stop_slideshow_ = true;
+                // advance when GIF finished its loops
+                if (auto display = Board::GetInstance().GetDisplay()) {
+                    if (!display->IsGifPlaying()) {
                         break;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    remaining -= 200;
                 }
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
+            // move to next automatically after finish
+            index++;
+        next_item:
+            continue;
         }
 
         // Clean up display and free preloaded buffers

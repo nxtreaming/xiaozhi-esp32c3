@@ -146,7 +146,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .panel_handle = panel_,
         .control_handle = nullptr,
         .buffer_size = chosen_buffer_size_spi,
-        .double_buffer = true,
+        // Use single buffering to cut internal SRAM usage roughly in half
+        .double_buffer = false,
         // SPI path: keep draw buffer in internal DMA memory, no trans buffer needed
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
@@ -1219,6 +1220,7 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     ESP_LOGI(TAG, "SPIRAM before Show: %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
+    std::unique_ptr<LvglGif> old_controller;
     if (gif_controller_ && gif_img_) {
         if (last_gif_data_ == gif_data && last_gif_size_ == gif_size) {
             lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
@@ -1230,8 +1232,8 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
             ESP_LOGI(TAG, "GIF reused without restart");
             return;
         }
-        // Different content
-        DestroyGif();
+        // Different content: keep current image visible and swap source after new controller ready
+        old_controller = std::move(gif_controller_);
     }
 
     lv_image_dsc_t src{};
@@ -1246,6 +1248,8 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
         gif_controller_.reset();
         return;
     }
+    // Play each GIF exactly 2 loops by default
+    gif_controller_->SetLoopCount(2);
 
     if (!gif_img_) {
         gif_img_ = lv_image_create(lv_screen_active());
@@ -1258,6 +1262,8 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     gif_controller_->SetFrameCallback([this]() {
         if (gif_img_) { lv_obj_invalidate(gif_img_); }
     });
+    // Play exactly 2 loops by default for managed buffer as well
+    gif_controller_->SetLoopCount(1);
     gif_controller_->Start();
 
     SetGifPos(x, y);
@@ -1266,6 +1272,12 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
     last_gif_data_ = gif_data;
     last_gif_size_ = gif_size;
+
+    // Now it is safe to stop and release old controller without blanking
+    if (old_controller) {
+        old_controller->Stop();
+        old_controller.reset();
+    }
 }
 
 void LcdDisplay::HideGif() {
@@ -1339,8 +1351,11 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
         return;
     }
 
-    // Fully destroy existing GIF if any - this will clean up previous resources and free managed buffer
-    DestroyGif();
+    // Seamless swap: don't blank image, prepare new controller first
+    std::unique_ptr<LvglGif> old_ctrl;
+    if (gif_controller_) {
+        old_ctrl = std::move(gif_controller_);
+    }
 
     // Keep a local reference so ShowGif's internal HideGif can't free it
     uint8_t* temp_buffer = gif_data;
@@ -1374,9 +1389,18 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
     lv_obj_move_foreground(gif_img_);
     last_gif_data_ = temp_buffer;
     last_gif_size_ = gif_size;
-    // Track owned managed buffer for later free in DestroyGif
+    // Track owned managed buffer for later free
+    uint8_t* old_managed = managed_gif_buffer_;
     managed_gif_buffer_ = temp_buffer;
     managed_gif_buffer_size_ = gif_size;
+    // Release previous controller and its managed buffer (if any) after swap
+    if (old_ctrl) {
+        old_ctrl->Stop();
+        old_ctrl.reset();
+    }
+    if (old_managed) {
+        heap_caps_free(old_managed);
+    }
     ESP_LOGI(TAG, "GIF with managed buffer displayed successfully");
 }
 

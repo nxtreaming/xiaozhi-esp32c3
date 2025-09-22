@@ -224,7 +224,11 @@ void LvglGif::DecoderLoop() {
         uint32_t elapsed = lv_tick_elaps(last_call_);
         uint32_t orig_ms = (uint32_t)gif_->gce.delay * 10u;
         bool high_fps = (orig_ms > 0u && orig_ms < 50u); // >20 fps
-        uint32_t frame_ms = high_fps ? 50u : (orig_ms < 40u ? 40u : orig_ms);
+        // Heuristic: large frames need slower updates to avoid starving LVGL
+        const uint32_t pixels = (uint32_t)gif_->width * (uint32_t)gif_->height;
+        const bool heavy_frame = (pixels >= 160000u); // ~400x400 and above
+        const uint32_t min_ms = heavy_frame ? 80u : 40u;
+        uint32_t frame_ms = orig_ms == 0u ? min_ms : (orig_ms < min_ms ? min_ms : orig_ms);
         if (elapsed < frame_ms) {
             vTaskDelay(pdMS_TO_TICKS(frame_ms - elapsed));
             continue;
@@ -232,7 +236,16 @@ void LvglGif::DecoderLoop() {
         last_call_ = lv_tick_get();
 
         // Decode next frame (heavy work off LVGL thread)
-        int has_next = gd_get_frame(gif_);
+        int has_next = 0;
+        // Guard GIF decoder that uses lv_malloc/lv_free with LVGL lock to avoid race
+        if (lvgl_port_lock(50)) {
+            has_next = gd_get_frame(gif_);
+            lvgl_port_unlock();
+        } else {
+            // Couldn't get lock promptly; yield and retry
+            vTaskDelay(1);
+            continue;
+        }
         if (has_next == 0) {
             playing_ = false;
             continue;
@@ -242,15 +255,28 @@ void LvglGif::DecoderLoop() {
 
         if (gif_->canvas) {
             // Always render to keep disposal/composition correct
-            gd_render_frame(gif_, gif_->canvas);
-            // Only display odd frames when original FPS > 20 (i.e., orig_ms < 50)
-            if (!high_fps || (frame_index_ & 1u)) {
+            if (lvgl_port_lock(50)) {
+                gd_render_frame(gif_, gif_->canvas);
+                lvgl_port_unlock();
+            } else {
+                vTaskDelay(1);
+                continue;
+            }
+            // Decimate frames for heavy gifs to reduce LVGL flush frequency
+            bool display_this = true;
+            if (heavy_frame) {
+                display_this = ((frame_index_ & 1u) == 0); // show every other frame
+            } else if (high_fps) {
+                display_this = (frame_index_ & 1u); // show odd frames only
+            }
+            if (display_this) {
                 if (frame_callback_) {
                     lv_async_call(LvglGif::AsyncFrameCb, this);
                 }
             }
         }
-        taskYIELD();
+        // Be nice to scheduler
+        vTaskDelay(1);
     }
 }
 

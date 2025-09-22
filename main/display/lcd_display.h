@@ -69,7 +69,10 @@ public:
     void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void HideGif() override;
     virtual bool IsGifPlaying() const override {
-        return gif_img_ != nullptr && !lv_obj_has_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+        if (gif_controller_) {
+            return gif_controller_->IsPlaying();
+        }
+        return false;
     }
     // Explicitly destroy GIF object and free any managed buffers
     void DestroyGif();

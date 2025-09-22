@@ -19,6 +19,11 @@
 #include "esp_io_expander_tca9554.h"
 #include "lcd_display.h"
 #include <iot_button.h>
+// Vendor-style SPD2010 touch (poll-only)
+#include "vendor_touch.h"
+// Touch driver
+#include "touch_spd2010.h"
+#include <lvgl.h>
 
 #define TAG "waveshare_lcd_1_46"
 
@@ -65,6 +70,7 @@ private:
     esp_io_expander_handle_t io_expander = NULL;
     LcdDisplay* display_;
     button_handle_t boot_btn, pwr_btn;
+    // Spd2010Touch* touch_ = nullptr; // replaced by vendor-style touch
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -75,6 +81,9 @@ private:
             .clk_source = I2C_CLK_SRC_DEFAULT,
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+        // Enable internal pull-ups as a safety net (use external 4.7k~10k if possible)
+        gpio_pullup_en(I2C_SDA_IO);
+        gpio_pullup_en(I2C_SCL_IO);
     }
     
     void InitializeTca9554(void) {
@@ -141,10 +150,29 @@ private:
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
         esp_lcd_panel_disp_on_off(panel, true);
-        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
+        if (DISPLAY_SWAP_XY) {
+            esp_lcd_panel_swap_xy(panel, true);
+        }
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
         display_ = new CustomLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+
+        // Initialize touch and register LVGL indev
+        // Init vendor-style touch with interrupt pin
+        if (spd2010_touch_init(i2c_bus_, TP_PIN_NUM_INT) != ESP_OK) {
+            ESP_LOGW(TAG, "SPD2010 vendor touch init failed");
+        }
+        // Enable debug logs for touch to help verification
+        esp_log_level_set("SPD2010_VND", ESP_LOG_DEBUG);
+        // Register LVGL input device (pointer) (LVGL v9 API)
+        lv_indev_t *indev = lv_indev_create();
+        lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(indev, spd2010_lvgl_read_cb);
+        // Attach to default display
+        lv_indev_set_disp(indev, lv_display_get_default());
+
+        // Note: Cursor creation removed to avoid initialization issues
+        // Touch input will work without visible cursor
     }
  
     void InitializeButtonsCustom() {
