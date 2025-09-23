@@ -1,3 +1,5 @@
+#include "sdkconfig.h"
+
 #include "wifi_board.h"
 #include "audio_codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
@@ -43,7 +45,7 @@ public:
         area->x2 = ((x2 >> 2) << 2) + 3;    // round the end of coordinate up to the nearest 4N+3 number
     }
 
-    CustomLcdDisplay(esp_lcd_panel_io_handle_t io_handle, 
+    CustomLcdDisplay(esp_lcd_panel_io_handle_t io_handle,
                     esp_lcd_panel_handle_t panel_handle,
                     int width,
                     int height,
@@ -51,7 +53,7 @@ public:
                     int offset_y,
                     bool mirror_x,
                     bool mirror_y,
-                    bool swap_xy) 
+                    bool swap_xy)
         : SpiLcdDisplay(io_handle, panel_handle,
                     width, height, offset_x, offset_y, mirror_x, mirror_y, swap_xy,
                     {
@@ -85,14 +87,14 @@ private:
         gpio_pullup_en(I2C_SDA_IO);
         gpio_pullup_en(I2C_SCL_IO);
     }
-    
+
     void InitializeTca9554(void) {
         esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus_, I2C_ADDRESS, &io_expander);
         if(ret != ESP_OK)
-            ESP_LOGE(TAG, "TCA9554 create returned error");        
+            ESP_LOGE(TAG, "TCA9554 create returned error");
 
         // uint32_t input_level_mask = 0;
-        // ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, IO_EXPANDER_INPUT);               // 设置引脚 EXIO0 和 EXIO1 模式为输入 
+        // ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, IO_EXPANDER_INPUT);               // 设置引脚 EXIO0 和 EXIO1 模式为输入
         // ret = esp_io_expander_get_level(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, &input_level_mask);             // 获取引脚 EXIO0 和 EXIO1 的电平状态,存放在 input_level_mask 中
 
         // ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_2 | IO_EXPANDER_PIN_NUM_3, IO_EXPANDER_OUTPUT);              // 设置引脚 EXIO2 和 EXIO3 模式为输出
@@ -128,12 +130,12 @@ private:
         esp_lcd_panel_handle_t panel = nullptr;
 
         ESP_LOGI(TAG, "Install panel IO");
-        
+
         const esp_lcd_panel_io_spi_config_t io_config = SPD2010_PANEL_IO_QSPI_CONFIG(QSPI_PIN_NUM_LCD_CS, NULL, NULL);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)QSPI_LCD_HOST, &io_config, &panel_io));
 
         ESP_LOGI(TAG, "Install SPD2010 panel driver");
-        
+
         spd2010_vendor_config_t vendor_config = {
             .flags = {
                 .use_qspi_interface = 1,
@@ -162,8 +164,12 @@ private:
         if (spd2010_touch_init(i2c_bus_, TP_PIN_NUM_INT) != ESP_OK) {
             ESP_LOGW(TAG, "SPD2010 vendor touch init failed");
         }
-        // Enable debug logs for touch to help verification
-        esp_log_level_set("SPD2010_VND", ESP_LOG_DEBUG);
+        // Set touch logs to INFO level (requested)
+        esp_log_level_set("SPD2010_VND", ESP_LOG_INFO);
+#if CONFIG_SUPPRESS_I2C_MASTER_LOGS
+        // Optionally suppress I2C driver logs (configurable via Menuconfig)
+        esp_log_level_set("i2c.master", ESP_LOG_NONE);
+#endif
         // Register LVGL input device (pointer) (LVGL v9 API)
         lv_indev_t *indev = lv_indev_create();
         lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
@@ -174,14 +180,14 @@ private:
         // Note: Cursor creation removed to avoid initialization issues
         // Touch input will work without visible cursor
     }
- 
+
     void InitializeButtonsCustom() {
-        gpio_reset_pin(BOOT_BUTTON_GPIO);                                     
-        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);   
-        gpio_reset_pin(PWR_BUTTON_GPIO);                                     
-        gpio_set_direction(PWR_BUTTON_GPIO, GPIO_MODE_INPUT);   
-        gpio_reset_pin(PWR_Control_PIN);                                     
-        gpio_set_direction(PWR_Control_PIN, GPIO_MODE_OUTPUT);     
+        gpio_reset_pin(BOOT_BUTTON_GPIO);
+        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
+        gpio_reset_pin(PWR_BUTTON_GPIO);
+        gpio_set_direction(PWR_BUTTON_GPIO, GPIO_MODE_INPUT);
+        gpio_reset_pin(PWR_Control_PIN);
+        gpio_set_direction(PWR_Control_PIN, GPIO_MODE_OUTPUT);
         // gpio_set_level(PWR_Control_PIN, false);
         gpio_set_level(PWR_Control_PIN, true);
     }
@@ -220,9 +226,9 @@ private:
         };
         pwr_btn = iot_button_create(&btns_config);
         iot_button_register_cb(pwr_btn, BUTTON_SINGLE_CLICK, [](void* button_handle, void* usr_data) {
-            // auto self = static_cast<CustomBoard*>(usr_data);                                     // 以下程序实现供用户参考 ，实现单击pwr按键调整亮度               
+            // auto self = static_cast<CustomBoard*>(usr_data);                                     // 以下程序实现供用户参考 ，实现单击pwr按键调整亮度
             // if(self->GetBacklight()->brightness() > 1)                                           // 如果亮度不为0
-            //     self->GetBacklight()->SetBrightness(1);                                          // 设置亮度为1         
+            //     self->GetBacklight()->SetBrightness(1);                                          // 设置亮度为1
             // else
             //     self->GetBacklight()->RestoreBrightness();                                       // 恢复原本亮度
             // 短按无处理
@@ -248,7 +254,7 @@ private:
     }
 
 public:
-    CustomBoard() { 
+    CustomBoard() {
         InitializeI2c();
         InitializeTca9554();
         InitializeSpi();
@@ -268,7 +274,7 @@ public:
     virtual Display* GetDisplay() override {
         return display_;
     }
-    
+
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;

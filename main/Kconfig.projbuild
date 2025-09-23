@@ -71,7 +71,7 @@ choice BOARD_TYPE
     config BOARD_TYPE_ESP_BOX
         bool "ESP BOX"
     config BOARD_TYPE_ESP_BOX_LITE
-        bool "ESP BOX Lite"        
+        bool "ESP BOX Lite"
     config BOARD_TYPE_KEVIN_BOX_1
         bool "Kevin Box 1"
     config BOARD_TYPE_KEVIN_BOX_2
@@ -193,7 +193,7 @@ choice DISPLAY_LCD_TYPE
     config LCD_ST7796_320X480
         bool "ST7796, 分辨率320*480 IPS"
     config LCD_ST7796_320X480_NO_IPS
-        bool "ST7796, 分辨率320*480, 非IPS"    
+        bool "ST7796, 分辨率320*480, 非IPS"
     config LCD_ILI9341_240X320
         bool "ILI9341, 分辨率240*320"
     config LCD_ILI9341_240X320_NO_IPS
@@ -220,7 +220,7 @@ config USE_WECHAT_MESSAGE_STYLE
     bool "使用微信聊天界面风格"
     default n
     help
-        使用微信聊天界面风格   
+        使用微信聊天界面风格
 
 config USE_AUDIO_PROCESSOR
     bool "启用音频降噪、增益处理"
@@ -236,3 +236,17 @@ config USE_WAKE_WORD_DETECT
     help
         需要 ESP32 S3 与 AFE 支持
 endmenu
+
+# Logging options
+menu "Logging Options"
+
+config SUPPRESS_I2C_MASTER_LOGS
+    bool "Suppress i2c.master driver logs on console"
+    default y
+    help
+        When enabled, the application will set the log level for the
+        i2c.master TAG to NONE at runtime to hide transient I2C NACK/timeout
+        messages. Disable this if you are diagnosing I2C issues.
+
+endmenu
+
