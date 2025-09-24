@@ -1248,8 +1248,8 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
         gif_controller_.reset();
         return;
     }
-    // Play each GIF exactly 2 loops by default
-    gif_controller_->SetLoopCount(2);
+    // Loop GIF indefinitely until user swipes (0 = infinite loops)
+    gif_controller_->SetLoopCount(0);
 
     if (!gif_img_) {
         gif_img_ = lv_image_create(lv_screen_active());
@@ -1262,8 +1262,8 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     gif_controller_->SetFrameCallback([this]() {
         if (gif_img_) { lv_obj_invalidate(gif_img_); }
     });
-    // Play exactly 2 loops by default for managed buffer as well
-    gif_controller_->SetLoopCount(1);
+    // Ensure infinite looping here as well
+    gif_controller_->SetLoopCount(0);
     gif_controller_->Start();
 
     SetGifPos(x, y);

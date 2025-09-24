@@ -6,6 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include "config.h"
 
 static const char *TAG = "SPD2010_VND";
 static TaskHandle_t s_touch_task = NULL;
@@ -27,6 +28,7 @@ static i2c_master_bus_handle_t s_bus = NULL;
 static i2c_master_dev_handle_t s_dev = NULL;
 static gpio_num_t s_int_gpio = GPIO_NUM_NC;
 static volatile int s_i2c_fail_streak = 0;
+static volatile bool s_need_clear_int = false;
 
 // SPD2010 registers (16-bit)
 #define REG_POINT_MODE   0x5000
@@ -172,8 +174,13 @@ static inline esp_err_t write_clear_int(void)  { uint8_t v[2] = {1,0}; return wr
 static void spd2010_touch_task_entry(void *arg)
 {
     (void)arg;
-    TickType_t delay_ticks = pdMS_TO_TICKS(10); // base ~100Hz
+    TickType_t delay_ticks = pdMS_TO_TICKS(10); // base ~100Hz (stable)
     for (;;) {
+        // Honor clear-int requests from LVGL side (timeout-release path)
+        if (s_need_clear_int) {
+            write_clear_int();
+            s_need_clear_int = false;
+        }
         uint16_t x = 0, y = 0;
         bool pressed = spd2010_touch_read_first(&x, &y);
         if (s_touch_lock) {
@@ -302,14 +309,17 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
     bool cpu_run = (s[1] & 0x08) != 0;
     uint16_t read_len = (uint16_t)(s[3] << 8) | s[2];
 
-    // Debug: log state transitions occasionally
+    // Track last successful HDP parse time for gentle recovery
+    static TickType_t s_last_hdp_ok_tick = 0;
+
+    // Debug: log state/pt change only (reduce noise)
     static uint8_t last_state = 0xFF; // bit2:run, bit1:cpu, bit0:bios
+    static int last_pt = -1;
     uint8_t cur_state = (cpu_run ? 0x4 : 0) | (in_cpu ? 0x2 : 0) | (in_bios ? 0x1 : 0);
-    static int poll_cnt = 0;
-    if (cur_state != last_state || (++poll_cnt % 200) == 0) {
-        ESP_LOGI(TAG, "Status: BIOS=%d CPU=%d RUN=%d pt=%d len=%u", in_bios, in_cpu, cpu_run, pt_exist, (unsigned)read_len);
+    if (cur_state != last_state || (int)pt_exist != last_pt) {
+        ESP_LOGD(TAG, "Status: BIOS=%d CPU=%d RUN=%d pt=%d len=%u", in_bios, in_cpu, cpu_run, pt_exist, (unsigned)read_len);
         last_state = cur_state;
-        if (poll_cnt >= 200) poll_cnt = 0;
+        last_pt = (int)pt_exist;
     }
 
     // If controller is in BIOS, try to start CPU like the vendor demo does
@@ -331,8 +341,29 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
         return false;
     }
 
-    // Optional INT gating only when CPU is running (optimization)
-    if (s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) != 0 && cpu_run) {
+    // Recovery: if we haven't successfully parsed HDP for a while, gently re-drive
+    {
+        TickType_t now = xTaskGetTickCount();
+        if (cpu_run && s_last_hdp_ok_tick != 0 && (now - s_last_hdp_ok_tick) > pdMS_TO_TICKS(1500)) {
+            write_point_mode();
+            esp_rom_delay_us(200);
+            write_start();
+            esp_rom_delay_us(200);
+            write_clear_int();
+            s_last_hdp_ok_tick = now; // avoid repeated pokes
+        }
+    }
+
+    // When idle (no point and no payload), we may skip work if INT is high; otherwise we gently drive
+    if (cpu_run && (!pt_exist && read_len == 0)) {
+        if (s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) != 0) {
+            return false;
+        }
+        write_point_mode();
+        esp_rom_delay_us(200);
+        write_start();
+        esp_rom_delay_us(200);
+        write_clear_int();
         return false;
     }
 
@@ -341,9 +372,9 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
         return false;
     }
 
-    // Read first packet via HDP and parse
+    // Read first packet via HDP and parse (do not gate by INT if pt_exist says there is data)
     uint8_t buf[4 + 10 * 6] = {0};
-    if (rd16(REG_HDP, buf, read_len) != ESP_OK) return false;
+    if (rd16(REG_HDP, buf, read_len) != ESP_OK) { if (cpu_run) write_clear_int(); return false; }
 
     // Parse first touch point according to SPD2010 format
     uint8_t b5 = buf[5];
@@ -351,7 +382,7 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
     uint8_t b7 = buf[7];
     uint8_t w  = buf[8];
 
-    if (w == 0) return false;
+    if (w == 0) { if (cpu_run) write_clear_int(); return false; }
 
     uint16_t px = (uint16_t)(((b7 & 0xF0) << 4) | b5);
     uint16_t py = (uint16_t)(((b7 & 0x0F) << 8) | b6);
@@ -377,7 +408,8 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
             }
         }
     }
-
+    // Mark last successful HDP parse time for recovery logic
+    s_last_hdp_ok_tick = xTaskGetTickCount();
     return true;
 }
 
@@ -412,16 +444,121 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         }
     }
 
+    // Simple swipe detection across LVGL read cycles
+    static bool s_pressed = false;
+    static uint16_t s_down_x = 0, s_down_y = 0;
+    static uint16_t s_last_x = 0, s_last_y = 0;
+    static uint32_t s_press_start_ms = 0;
+    static uint32_t s_last_move_ms = 0;
+    static uint32_t s_force_release_deadline_ms = 0;
+
+    uint32_t now_ms = lv_tick_get();
+    // If we recently forced a release, temporarily mask pressed
+    if (s_force_release_deadline_ms != 0) {
+        if (now_ms < s_force_release_deadline_ms) {
+            pressed = false;
+        } else {
+            s_force_release_deadline_ms = 0;
+        }
+    }
+
+    // Transform raw coordinates using board config (no scaling)
+    lv_display_t *disp = lv_display_get_default();
+    lv_coord_t scr_w = disp ? lv_display_get_horizontal_resolution(disp) : DISPLAY_WIDTH;
+    lv_coord_t scr_h = disp ? lv_display_get_vertical_resolution(disp)   : DISPLAY_HEIGHT;
+    uint16_t tx = x;
+    uint16_t ty = y;
+    if (DISPLAY_SWAP_XY) { uint16_t t = tx; tx = ty; ty = t; }
+    if (DISPLAY_MIRROR_X) { if (tx < scr_w) tx = (uint16_t)(scr_w - 1 - tx); }
+    if (DISPLAY_MIRROR_Y) { if (ty < scr_h) ty = (uint16_t)(scr_h - 1 - ty); }
+    if (tx >= scr_w) tx = (uint16_t)(scr_w - 1);
+    if (ty >= scr_h) ty = (uint16_t)(scr_h - 1);
+
+
+
     if (pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = x;
-        data->point.y = y;
-        ESP_LOGI(TAG, "Touch PRESSED x=%u y=%u", (unsigned)x, (unsigned)y);
+        data->point.x = tx;
+        data->point.y = ty;
+        const int kDebouncePx = 3;
+        if (!s_pressed) {
+            s_pressed = true;
+            s_down_x = s_last_x = tx;
+            s_down_y = s_last_y = ty;
+            s_press_start_ms = now_ms;
+            s_last_move_ms = now_ms;
+        } else {
+            int mdx = (int)tx - (int)s_last_x;
+            int mdy = (int)ty - (int)s_last_y;
+            if (mdx < 0) mdx = -mdx;
+            if (mdy < 0) mdy = -mdy;
+            if (mdx >= kDebouncePx || mdy >= kDebouncePx) {
+                s_last_x = tx;
+                s_last_y = ty;
+                s_last_move_ms = now_ms;
+            }
+        }
+        // Timeout release protection: >1000ms no meaningful move
+        if (s_pressed && (now_ms - s_press_start_ms > 1000) && (now_ms - s_last_move_ms > 1000)) {
+            int dx = (int)s_last_x - (int)s_down_x;
+            int dy = (int)s_last_y - (int)s_down_y;
+            int adx = dx < 0 ? -dx : dx;
+            int ady = dy < 0 ? -dy : dy;
+            const int kSwipeThreshold = 20; // more sensitive
+            ESP_LOGI(TAG, "Timeout release: dx=%d dy=%d from (%u,%u)->(%u,%u)", dx, dy,
+                     (unsigned)s_down_x, (unsigned)s_down_y, (unsigned)s_last_x, (unsigned)s_last_y);
+            if (adx > kSwipeThreshold && adx > ady) {
+                extern bool app_is_slideshow_running(void);
+                extern void app_slideshow_next(void);
+                extern void app_slideshow_prev(void);
+                if (app_is_slideshow_running()) {
+                    if (dx < 0) {
+                        ESP_LOGI(TAG, "Gesture: swipe left -> Next");
+                        app_slideshow_next();
+                    } else {
+                        ESP_LOGI(TAG, "Gesture: swipe right -> Prev");
+                        app_slideshow_prev();
+                    }
+                }
+            }
+            s_pressed = false;
+            s_need_clear_int = true; // ask background to clear INT
+            s_force_release_deadline_ms = now_ms + 150; // mask pressed briefly
+            data->state = LV_INDEV_STATE_RELEASED;
+        }
+        // Rate-limit press logs to avoid flooding
+        static uint32_t s_last_press_log = 0;
+        if (now_ms - s_last_press_log > 250) {
+            ESP_LOGI(TAG, "Touch PRESSED x=%u y=%u", (unsigned)tx, (unsigned)ty);
+            s_last_press_log = now_ms;
+        }
+
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
-        static int release_count = 0;
-        if (++release_count % 100 == 0) {
-            ESP_LOGD(TAG, "Touch RELEASED (logged every 100 calls)");
+        if (s_pressed) {
+            s_pressed = false;
+            int dx = (int)s_last_x - (int)s_down_x;
+            int dy = (int)s_last_y - (int)s_down_y;
+            ESP_LOGI(TAG, "Release: dx=%d dy=%d from (%u,%u)->(%u,%u)", dx, dy,
+                     (unsigned)s_down_x, (unsigned)s_down_y, (unsigned)s_last_x, (unsigned)s_last_y);
+            int adx = dx < 0 ? -dx : dx;
+            int ady = dy < 0 ? -dy : dy;
+            const int kSwipeThreshold = 20; // more sensitive
+            if (adx > kSwipeThreshold && adx > ady) {
+                // Bridge to application slideshow controls (C wrappers)
+                extern bool app_is_slideshow_running(void);
+                extern void app_slideshow_next(void);
+                extern void app_slideshow_prev(void);
+                if (app_is_slideshow_running()) {
+                    if (dx < 0) {
+                        ESP_LOGI(TAG, "Gesture: swipe left -> Next");
+                        app_slideshow_next();
+                    } else {
+                        ESP_LOGI(TAG, "Gesture: swipe right -> Prev");
+                        app_slideshow_prev();
+                    }
+                }
+            }
         }
     }
 }
