@@ -1356,17 +1356,6 @@ void Application::SlideShowPrev()
     }
 }
 
-extern "C" bool app_is_slideshow_running(void) {
-    return Application::GetInstance().IsSlideShowRunning();
-}
-extern "C" void app_slideshow_next(void) {
-    Application::GetInstance().SlideShowNext();
-}
-extern "C" void app_slideshow_prev(void) {
-    Application::GetInstance().SlideShowPrev();
-}
-
-
 void Application::SlideShow()
 {
     // Prevent concurrent slideshows
@@ -1457,7 +1446,7 @@ void Application::SlideShow()
             if (auto display = Board::GetInstance().GetDisplay()) {
                 display->ShowGif(items[index].data, items[index].size, 0, 0);
             }
-            // wait for user swipe to change item; do not auto-advance when GIF finishes
+            // wait until current GIF finishes (plays 2 loops) or user skips
             while (!stop_slideshow_) {
                 if (device_state_ != kDeviceStateIdle) {
                     ESP_LOGW(TAG, "Device state changed, abort SlideShow");
@@ -1466,13 +1455,19 @@ void Application::SlideShow()
                 }
                 int skip = slideshow_skip_.exchange(0);
                 if (skip != 0) {
-                    index += skip; // -1 prev, +1 next (from gesture)
+                    index += skip; // -1 prev, +1 next
                     goto next_item;
                 }
-                // Keep current GIF looping until user swipes to change item
+                // advance when GIF finished its loops
+                if (auto display = Board::GetInstance().GetDisplay()) {
+                    if (!display->IsGifPlaying()) {
+                        break;
+                    }
+                }
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
-            // no automatic index change here; wait strictly for gestures
+            // move to next automatically after finish
+            index++;
         next_item:
             continue;
         }
