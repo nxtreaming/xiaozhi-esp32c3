@@ -1387,8 +1387,12 @@ void Application::SlideShow()
             //"http://122.51.57.185:18080/412_Normal.gif",
             //"http://122.51.57.185:18080/412_think.gif",
             //"http://122.51.57.185:18080/412_angry.gif",
-            "http://122.51.57.185:18080/412_cheer.gif",
-            "http://122.51.57.185:18080/412_sadly.gif"
+            "http://122.51.57.185:18080/g1.gif",
+            "http://122.51.57.185:18080/g2.gif",
+            "http://122.51.57.185:18080/g3.gif",
+            "http://122.51.57.185:18080/g4.gif"
+            //"http://122.51.57.185:18080/412_cheer.gif",
+            //"http://122.51.57.185:18080/412_sadly.gif"
         };
         constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
 
