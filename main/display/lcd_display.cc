@@ -318,7 +318,12 @@ void LcdDisplay::SetGifPos(int x, int y) {
         cx = (width_ - gif_controller_->width()) / 2;
         cy = (height_ - gif_controller_->height()) / 2;
     }
-    lv_obj_set_pos(gif_img_, cx, cy);
+    if (gif_img_) {
+        lv_obj_set_pos(gif_img_, cx, cy);
+    }
+    if (gif_img_b_) {
+        lv_obj_set_pos(gif_img_b_, cx, cy);
+    }
 }
 
 LcdDisplay::~LcdDisplay() {
@@ -329,6 +334,10 @@ LcdDisplay::~LcdDisplay() {
     if (gif_img_ != nullptr) {
         lv_obj_del(gif_img_);
         gif_img_ = nullptr;
+    }
+    if (gif_img_b_ != nullptr) {
+        lv_obj_del(gif_img_b_);
+        gif_img_b_ = nullptr;
     }
 
     // 然后再清理 LVGL 其他对象
@@ -1221,14 +1230,15 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
     std::unique_ptr<LvglGif> old_controller;
-    if (gif_controller_ && gif_img_) {
+    lv_obj_t* active_obj = (active_gif_view_ == 0 ? gif_img_ : gif_img_b_);
+    if (gif_controller_ && active_obj) {
         if (last_gif_data_ == gif_data && last_gif_size_ == gif_size) {
-            lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(active_obj, LV_OBJ_FLAG_HIDDEN);
             if (!gif_controller_->IsPlaying()) {
                 gif_controller_->Start();
             }
             SetGifPos(x, y);
-            lv_obj_move_foreground(gif_img_);
+            lv_obj_move_foreground(active_obj);
             ESP_LOGI(TAG, "GIF reused without restart");
             return;
         }
@@ -1242,36 +1252,53 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     src.data = gif_data;
     src.data_size = gif_size;
 
-    gif_controller_ = std::make_unique<LvglGif>(&src);
-    if (!gif_controller_ || !gif_controller_->IsLoaded()) {
+    auto new_controller = std::make_unique<LvglGif>(&src);
+    if (!new_controller || !new_controller->IsLoaded()) {
         ESP_LOGE(TAG, "Failed to initialize GIF controller");
-        gif_controller_.reset();
         return;
     }
     // Loop GIF indefinitely until user swipes (0 = infinite loops)
-    gif_controller_->SetLoopCount(0);
+    new_controller->SetLoopCount(0);
 
+    // Ensure two LVGL image views exist (for seamless switching)
     if (!gif_img_) {
         gif_img_ = lv_image_create(lv_screen_active());
-        if (!gif_img_) { gif_controller_.reset(); return; }
+        if (!gif_img_) { return; }
         ensure_gif_style();
         lv_obj_add_style(gif_img_, &s_gif_style, 0);
+        lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!gif_img_b_) {
+        gif_img_b_ = lv_image_create(lv_screen_active());
+        if (!gif_img_b_) { return; }
+        ensure_gif_style();
+        lv_obj_add_style(gif_img_b_, &s_gif_style, 0);
+        lv_obj_add_flag(gif_img_b_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_image_set_src(gif_img_, gif_controller_->image_dsc());
-    gif_controller_->SetFrameCallback([this]() {
-        if (gif_img_) { lv_obj_invalidate(gif_img_); }
+    // Render on the inactive view, keep current visible until swap
+    lv_obj_t* target = (active_gif_view_ == 0 ? gif_img_b_ : gif_img_);
+    lv_image_set_src(target, new_controller->image_dsc());
+    new_controller->SetFrameCallback([this, target]() {
+        if (target) { lv_obj_invalidate(target); }
     });
-    // Ensure infinite looping here as well
-    gif_controller_->SetLoopCount(0);
-    gif_controller_->Start();
+    new_controller->Start();
 
     SetGifPos(x, y);
-    lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(gif_img_);
-    ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
+    lv_obj_clear_flag(target, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(target);
+
+    if (active_obj) {
+        lv_obj_add_flag(active_obj, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Commit controller and swap active view index
+    gif_controller_ = std::move(new_controller);
     last_gif_data_ = gif_data;
     last_gif_size_ = gif_size;
+    active_gif_view_ ^= 1u;
+
+    ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
 
     // Now it is safe to stop and release old controller without blanking
     if (old_controller) {
@@ -1306,6 +1333,9 @@ void LcdDisplay::HideGifImpl_() {
     if (gif_img_) {
         lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     }
+    if (gif_img_b_) {
+        lv_obj_add_flag(gif_img_b_, LV_OBJ_FLAG_HIDDEN);
+    }
     ESP_LOGI(TAG, "SPIRAM after Hide (paused): %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 }
@@ -1328,6 +1358,11 @@ void LcdDisplay::DestroyGif() {
         lv_image_set_src(gif_img_, NULL);
         lv_obj_add_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     }
+    if (gif_img_b_ != nullptr) {
+        lv_image_set_src(gif_img_b_, NULL);
+        lv_obj_add_flag(gif_img_b_, LV_OBJ_FLAG_HIDDEN);
+    }
+    active_gif_view_ = 0;
 }
 
 void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, int x, int y) {

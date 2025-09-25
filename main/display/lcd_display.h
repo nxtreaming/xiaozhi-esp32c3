@@ -15,7 +15,7 @@ class LcdDisplay : public Display {
 protected:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    
+
     lv_draw_buf_t draw_buf_;
     lv_obj_t* status_bar_ = nullptr;
     lv_obj_t* content_ = nullptr;
@@ -39,6 +39,11 @@ protected:
     uint8_t* managed_gif_buffer_ = nullptr;
     size_t managed_gif_buffer_size_ = 0;
 
+    // Second LVGL image for seamless GIF switching
+    lv_obj_t* gif_img_b_ = nullptr;
+    // Which image view currently active: 0 -> gif_img_, 1 -> gif_img_b_
+    uint8_t active_gif_view_ = 0;
+
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -47,7 +52,7 @@ protected:
     // 添加protected构造函数
     LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, DisplayFonts fonts)
         : panel_io_(panel_io), panel_(panel), fonts_(fonts) {}
-    
+
 public:
     ~LcdDisplay();
     virtual void SetEmotion(const char* emotion) override;
@@ -56,10 +61,10 @@ public:
     // void SetupBluetoothUI();
     // void UpdateBluetoothStatus(bool is_connected, char* device_name);
 
-    
+
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
-    virtual void SetChatMessage(const char* role, const char* content) override; 
-#endif  
+    virtual void SetChatMessage(const char* role, const char* content) override;
+#endif
 
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
