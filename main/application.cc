@@ -1384,7 +1384,7 @@ void Application::SlideShow()
             //"http://122.51.57.185:18080/test2.gif",
             //"http://122.51.57.185:18080/test3.gif",
             //"http://122.51.57.185:18080/huahua-1.gif",
-            "http://122.51.57.185:18080/412_Normal.gif",
+            //"http://122.51.57.185:18080/412_Normal.gif",
             //"http://122.51.57.185:18080/412_think.gif",
             //"http://122.51.57.185:18080/412_angry.gif",
             "http://122.51.57.185:18080/412_cheer.gif",

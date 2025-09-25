@@ -1,5 +1,3 @@
-#include "sdkconfig.h"
-
 #include "wifi_board.h"
 #include "audio_codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
@@ -26,6 +24,7 @@
 // Touch driver
 #include "touch_spd2010.h"
 #include <lvgl.h>
+#include "qmi8658_sensor.h"
 
 #define TAG "waveshare_lcd_1_46"
 
@@ -73,6 +72,7 @@ private:
     LcdDisplay* display_;
     button_handle_t boot_btn, pwr_btn;
     // Spd2010Touch* touch_ = nullptr; // replaced by vendor-style touch
+    Qmi8658Sensor* imu_ = nullptr;
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -109,8 +109,80 @@ private:
         ret = esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, 0);                                // 复位 LCD 与 TouchPad
         ESP_ERROR_CHECK(ret);
         vTaskDelay(pdMS_TO_TICKS(300));
+
         ret = esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, 1);                                // 复位 LCD 与 TouchPad
         ESP_ERROR_CHECK(ret);
+    }
+
+    void StartImuTask() {
+        if (imu_ == nullptr) {
+            imu_ = new Qmi8658Sensor(i2c_bus_, 0x6B);
+            if (!imu_->Init()) {
+                ESP_LOGW(TAG, "QMI8658 init failed");
+                delete imu_;
+                imu_ = nullptr;
+                return;
+            }
+        }
+        xTaskCreate(
+            [](void* arg){
+                auto self = static_cast<CustomBoard*>(arg);
+                const float kGyroTriggerDps = 35.0f;            // 触发阈值（dps）
+                const TickType_t kCooldown = pdMS_TO_TICKS(800); // 冷却时间
+                static TickType_t last_trigger = 0;
+                int fail_count = 0;
+                for(;;) {
+                    Qmi8658Sensor::Vec3f g;
+                    if (!self->imu_->TryReadGyro(&g)) {
+                        // 累计失败，逐步退避，避免对系统造成压力
+                        fail_count++;
+                        if (fail_count >= 5) {
+                            ESP_LOGW("IMU", "TryReadGyro failed %d times, backing off", fail_count);
+                            vTaskDelay(pdMS_TO_TICKS(1500));
+                            fail_count = 0; // 重置计数，继续尝试
+                        } else {
+                            vTaskDelay(pdMS_TO_TICKS(250));
+                        }
+                        continue;
+                    }
+                    fail_count = 0; // 成功读取后清零
+
+                    // 圆盘设备：主要使用 X/Y 轴旋转作为手势依据
+                    // 策略：取 X/Y 中幅度更大的轴作为本次判定轴；正向触发下一张，反向触发上一张
+                    if (xTaskGetTickCount() - last_trigger > kCooldown) {
+                        float ax = g.x, ay = g.y;
+                        // 避免引入 <math.h>，用平方比较幅度大小
+                        if ((ax * ax) >= (ay * ay)) {
+                            if (ax > kGyroTriggerDps) {
+                                if (Application::GetInstance().IsSlideShowRunning())
+                                    Application::GetInstance().SlideShowNext();
+                                ESP_LOGI("IMU", "Gesture: NEXT by X (gx=%.1f)", ax);
+                                last_trigger = xTaskGetTickCount();
+                            } else if (ax < -kGyroTriggerDps) {
+                                if (Application::GetInstance().IsSlideShowRunning())
+                                    Application::GetInstance().SlideShowPrev();
+                                ESP_LOGI("IMU", "Gesture: PREV by X (gx=%.1f)", ax);
+                                last_trigger = xTaskGetTickCount();
+                            }
+                        } else {
+                            if (ay > kGyroTriggerDps) {
+                                if (Application::GetInstance().IsSlideShowRunning())
+                                    Application::GetInstance().SlideShowNext();
+                                ESP_LOGI("IMU", "Gesture: NEXT by Y (gy=%.1f)", ay);
+                                last_trigger = xTaskGetTickCount();
+                            } else if (ay < -kGyroTriggerDps) {
+                                if (Application::GetInstance().IsSlideShowRunning())
+                                    Application::GetInstance().SlideShowPrev();
+                                ESP_LOGI("IMU", "Gesture: PREV by Y (gy=%.1f)", ay);
+                                last_trigger = xTaskGetTickCount();
+                            }
+                        }
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(80));
+                }
+            },
+            "imu_read_task", 4096, this, 2, nullptr
+        );
     }
 
     void InitializeSpi() {
@@ -133,6 +205,7 @@ private:
 
         const esp_lcd_panel_io_spi_config_t io_config = SPD2010_PANEL_IO_QSPI_CONFIG(QSPI_PIN_NUM_LCD_CS, NULL, NULL);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)QSPI_LCD_HOST, &io_config, &panel_io));
+
 
         ESP_LOGI(TAG, "Install SPD2010 panel driver");
 
@@ -261,6 +334,7 @@ public:
         Initializespd2010Display();
         InitializeButtons();
         InitializeIot();
+        StartImuTask();
         GetBacklight()->RestoreBrightness();
     }
 
