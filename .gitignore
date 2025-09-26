@@ -14,3 +14,4 @@ main/assets/lang_config.h
 .DS_Store
 .localdev/
 ESP32-S3-Touch-LCD-1.46-Demo/
+example-espressif__esp_lcd_spd2010-v1.0.2-qspi_with_ram/

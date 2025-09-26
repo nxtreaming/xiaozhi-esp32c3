@@ -15,6 +15,8 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_spd2010.h>
+#include <esp_lcd_touch_spd2010.h>
+
 #include <esp_timer.h>
 #include "esp_io_expander_tca9554.h"
 #include "lcd_display.h"
@@ -29,6 +31,18 @@
 #define TAG "waveshare_lcd_1_46"
 
 LV_FONT_DECLARE(font_puhui_16_4);
+static esp_lcd_touch_handle_t s_spd2010_tp = NULL;
+static void spd2010_official_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+    (void)indev;
+    if (!s_spd2010_tp) { data->state = LV_INDEV_STATE_RELEASED; return; }
+    esp_lcd_touch_read_data(s_spd2010_tp);
+    uint16_t x = 0, y = 0; uint8_t cnt = 0;
+    if (esp_lcd_touch_get_coordinates(s_spd2010_tp, &x, &y, NULL, &cnt, 1) && cnt > 0) {
+        data->state = LV_INDEV_STATE_PRESSED; data->point.x = x; data->point.y = y; return;
+    }
+    data->state = LV_INDEV_STATE_RELEASED;
+}
+
 LV_FONT_DECLARE(font_awesome_16_4);
 
 
@@ -233,25 +247,54 @@ private:
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
 
         // Initialize touch and register LVGL indev
-        // Init vendor-style touch with interrupt pin
-        if (spd2010_touch_init(i2c_bus_, TP_PIN_NUM_INT) != ESP_OK) {
-            ESP_LOGW(TAG, "SPD2010 vendor touch init failed");
-        }
-        // Set touch logs to INFO level (requested)
-        esp_log_level_set("SPD2010_VND", ESP_LOG_INFO);
-#if CONFIG_SUPPRESS_I2C_MASTER_LOGS
-        // Optionally suppress I2C driver logs (configurable via Menuconfig)
-        esp_log_level_set("i2c.master", ESP_LOG_NONE);
-#endif
-        // Register LVGL input device (pointer) (LVGL v9 API)
-        lv_indev_t *indev = lv_indev_create();
-        lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-        lv_indev_set_read_cb(indev, spd2010_lvgl_read_cb);
-        // Attach to default display
-        lv_indev_set_disp(indev, lv_display_get_default());
+        // Preferred: official esp_lcd_touch_spd2010 driver over I2C v2 bus
+        esp_lcd_panel_io_handle_t tp_io = NULL;
+        esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_SPD2010_CONFIG();
+        ESP_LOGI(TAG, "Install SPD2010 touch (official driver)");
+        esp_err_t tp_ret = esp_lcd_new_panel_io_i2c_v2(i2c_bus_, &tp_io_cfg, &tp_io);
 
-        // Note: Cursor creation removed to avoid initialization issues
-        // Touch input will work without visible cursor
+        esp_lcd_touch_handle_t tp = NULL;
+        if (tp_ret == ESP_OK) {
+            const esp_lcd_touch_config_t tp_cfg = {
+                .x_max = DISPLAY_WIDTH,
+                .y_max = DISPLAY_HEIGHT,
+                .rst_gpio_num = TP_PIN_NUM_RST,
+                .int_gpio_num = TP_PIN_NUM_INT,
+                .levels = { .reset = 0, .interrupt = 0 },
+                .flags = {
+                    .swap_xy = DISPLAY_SWAP_XY,
+                    .mirror_x = DISPLAY_MIRROR_X,
+                    .mirror_y = DISPLAY_MIRROR_Y,
+                },
+            };
+            tp_ret = esp_lcd_touch_new_i2c_spd2010(tp_io, &tp_cfg, &tp);
+        }
+
+        if (tp_ret == ESP_OK) {
+            s_spd2010_tp = tp;
+            lv_indev_t *indev = lv_indev_create();
+            lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+            lv_indev_set_read_cb(indev, spd2010_official_lvgl_read_cb);
+            lv_indev_set_disp(indev, lv_display_get_default());
+            ESP_LOGI(TAG, "SPD2010 touch initialized via official driver");
+        } else {
+            ESP_LOGW(TAG, "Official SPD2010 touch init failed (%s), falling back to vendor", esp_err_to_name(tp_ret));
+            // Fallback: vendor-style touch with interrupt pin
+            if (spd2010_touch_init(i2c_bus_, TP_PIN_NUM_INT) != ESP_OK) {
+                ESP_LOGW(TAG, "SPD2010 vendor touch init failed");
+            }
+            // Set touch logs to INFO level (requested)
+            esp_log_level_set("SPD2010_VND", ESP_LOG_INFO);
+        #if CONFIG_SUPPRESS_I2C_MASTER_LOGS
+            // Optionally suppress I2C driver logs (configurable via Menuconfig)
+            esp_log_level_set("i2c.master", ESP_LOG_NONE);
+        #endif
+            // Register LVGL input device (pointer) (LVGL v9 API)
+            lv_indev_t *indev = lv_indev_create();
+            lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+            lv_indev_set_read_cb(indev, spd2010_lvgl_read_cb);
+            lv_indev_set_disp(indev, lv_display_get_default());
+        }
     }
 
     void InitializeButtonsCustom() {

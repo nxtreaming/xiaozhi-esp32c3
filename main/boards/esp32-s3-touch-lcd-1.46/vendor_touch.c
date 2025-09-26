@@ -40,10 +40,31 @@ static esp_err_t rd16(uint16_t reg, uint8_t *data, size_t len)
     return i2c_master_transmit_receive(s_dev, addr, 2, data, len, 100);
 }
 
-static inline esp_err_t write_point_mode(void) { uint8_t v[2] = {0,0}; return wr16(REG_POINT_MODE, v, 2); }
-static inline esp_err_t write_start(void)      { uint8_t v[2] = {0,0}; return wr16(REG_START, v, 2); }
-static inline esp_err_t write_cpu_start(void)  { uint8_t v[2] = {1,0}; return wr16(REG_CPU_START, v, 2); }
-static inline esp_err_t write_clear_int(void)  { uint8_t v[2] = {1,0}; return wr16(REG_CLEAR_INT, v, 2); }
+// Some boards expect 16-bit payload as big-endian for write 'value'
+static bool s_payload_big_endian = false; // default little-endian: {LSB, MSB}
+
+static inline esp_err_t write_point_mode(void) {
+    uint8_t v[2] = {0,0};
+    return wr16(REG_POINT_MODE, v, 2);
+}
+static inline esp_err_t write_start(void) {
+    uint8_t v[2] = {0,0};
+    return wr16(REG_START, v, 2);
+}
+static inline esp_err_t write_cpu_start_dyn(void) {
+    uint8_t v[2] = {1,0};
+    if (s_payload_big_endian) { v[0] = 0; v[1] = 1; }
+    return wr16(REG_CPU_START, v, 2);
+}
+static inline esp_err_t write_clear_int_dyn(void) {
+    uint8_t v[2] = {1,0};
+    if (s_payload_big_endian) { v[0] = 0; v[1] = 1; }
+    return wr16(REG_CLEAR_INT, v, 2);
+}
+// Backward-compatible wrappers for earlier call-sites
+static inline esp_err_t write_cpu_start(void) { return write_cpu_start_dyn(); }
+static inline esp_err_t write_clear_int(void) { return write_clear_int_dyn(); }
+
 
 esp_err_t spd2010_touch_init(i2c_master_bus_handle_t bus, gpio_num_t int_gpio)
 {
@@ -73,35 +94,51 @@ esp_err_t spd2010_touch_init(i2c_master_bus_handle_t bus, gpio_num_t int_gpio)
             .intr_type = GPIO_INTR_DISABLE,
         };
         gpio_config(&io_conf);
+        ESP_LOGI(TAG, "INT initial level: %d", (int)gpio_get_level(s_int_gpio));
     }
 
     // Robust bring-up: try to transition BIOS -> CPU -> RUN with retries
     s_ready = false; s_cpu_run = false;
-    for (int tries = 0; tries < 8; ++tries) {
+    uint8_t last_state = 0xFF;
+    for (int tries = 0; tries < 20; ++tries) {
         uint8_t s[4] = {0};
         esp_err_t r = rd16(REG_STATUS_LEN, s, sizeof(s));
         if (r != ESP_OK) {
-            esp_rom_delay_us(5000);
+            ESP_LOGW(TAG, "Probe %d: rd16 failed: %s", tries + 1, esp_err_to_name(r));
+            esp_rom_delay_us(10000);
             continue;
         }
         bool in_bios = (s[1] & 0x40) != 0;
         bool in_cpu  = (s[1] & 0x20) != 0;
         bool cpu_run = (s[1] & 0x08) != 0;
+        uint16_t read_len = (uint16_t)(s[3] << 8) | s[2];
+        uint8_t cur_state = (cpu_run ? 0x4 : 0) | (in_cpu ? 0x2 : 0) | (in_bios ? 0x1 : 0);
+        if (cur_state != last_state) {
+            ESP_LOGI(TAG, "Probe %d: BIOS=%d CPU=%d RUN=%d len=%u [raw:%02X %02X %02X %02X]",
+                     tries + 1, in_bios, in_cpu, cpu_run, (unsigned)read_len, s[0], s[1], s[2], s[3]);
+            last_state = cur_state;
+        }
 
         if (in_bios) {
-            write_clear_int();
-            esp_rom_delay_us(200);
-            write_cpu_start();
+            esp_err_t e1 = write_clear_int_dyn();
+            esp_rom_delay_us(1000);
+            esp_err_t e2 = write_cpu_start_dyn();
+            ESP_LOGI(TAG, "BIOS: CLR_INT=%s CPU_START=%s%s", esp_err_to_name(e1), esp_err_to_name(e2), s_payload_big_endian?" (BE)":" (LE)");
             esp_rom_delay_us(5000);
+            if ((tries % 5) == 4) {
+                s_payload_big_endian = !s_payload_big_endian;
+                ESP_LOGW(TAG, "Switch payload endianness to %s for CPU_START", s_payload_big_endian?"BE":"LE");
+            }
             continue;
         }
         if (in_cpu && !cpu_run) {
-            write_point_mode();
-            esp_rom_delay_us(2000);
-            write_start();
-            esp_rom_delay_us(2000);
-            write_clear_int();
-            esp_rom_delay_us(2000);
+            esp_err_t e0 = write_point_mode();
+            esp_rom_delay_us(3000);
+            esp_err_t e1 = write_start();
+            esp_rom_delay_us(3000);
+            esp_err_t e2 = write_clear_int_dyn();
+            ESP_LOGI(TAG, "CPU:no-run: PNT=%s START=%s CLR_INT=%s%s", esp_err_to_name(e0), esp_err_to_name(e1), esp_err_to_name(e2), s_payload_big_endian?" (BE)":" (LE)");
+            esp_rom_delay_us(3000);
             continue;
         }
         if (cpu_run) {
@@ -113,6 +150,10 @@ esp_err_t spd2010_touch_init(i2c_master_bus_handle_t bus, gpio_num_t int_gpio)
     }
 
     ESP_LOGI(TAG, "Init result: ready=%d cpu_run=%d", (int)s_ready, (int)s_cpu_run);
+    if (!s_ready) {
+        ESP_LOGE(TAG, "SPD2010 failed to enter RUN state after retries");
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
