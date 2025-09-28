@@ -181,7 +181,7 @@ void yt_command_handler_task(void *pvParameters)
                 vTaskDelay(pdMS_TO_TICKS(630)); //200
                 // Application::GetInstance().Clearaudio();
                 // vTaskDelay(pdMS_TO_TICKS(250)); //200
-                ESP_LOGI(TAG, "你好，小智 ");
+                ESP_LOGI(TAG, "你好，小莲");
                 // auto &app = Application::GetInstance();
                 // app.ToggleChatState();
                 Application::GetInstance().WakeWordInvoke1();
