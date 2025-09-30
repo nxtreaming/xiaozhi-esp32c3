@@ -10,6 +10,9 @@ static gpio_num_t s_int_gpio = GPIO_NUM_NC;
 static bool s_ready = false;
 static bool s_cpu_run = false;
 
+// Global touch state for gesture tracking
+static spd2010_touch_data_t s_touch_state = {0};
+
 
 // SPD2010 registers (16-bit)
 #define REG_POINT_MODE   0x5000
@@ -165,7 +168,8 @@ void spd2010_touch_deinit(void)
     }
 }
 
-bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
+// Internal function to read full touch data with gesture support
+static bool spd2010_touch_read_internal(spd2010_touch_data_t *touch_data)
 {
     if (!s_dev) return false;
 
@@ -179,6 +183,8 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
     if (rd16(REG_STATUS_LEN, s, sizeof(s)) != ESP_OK) return false;
 
     bool pt_exist = (s[0] & 0x01) != 0;
+    bool gesture_flag = (s[0] & 0x02) != 0;
+    bool aux_flag = (s[0] & 0x08) != 0;
     bool in_bios = (s[1] & 0x40) != 0;
     bool in_cpu  = (s[1] & 0x20) != 0;
     bool cpu_run = (s[1] & 0x08) != 0;
@@ -216,9 +222,16 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
         return false;
     }
 
-    // Check if there's actually touch data before proceeding
-    if (!pt_exist || read_len < 10) {
-        // No touch data, safe to skip
+    // Handle AUX data (auxiliary data from touch controller)
+    if (cpu_run && aux_flag) {
+        ESP_LOGD(TAG, "AUX data detected, clearing interrupt");
+        write_clear_int();
+        return false;
+    }
+
+    // Check if there's touch data or gesture to read
+    if ((!pt_exist && !gesture_flag) || read_len < 10) {
+        // No touch data or gesture, safe to skip
         // Optional: clear INT if it's asserted but no valid data
         if (cpu_run && s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) == 0) {
             write_clear_int();
@@ -226,7 +239,7 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
         return false;
     }
 
-    // If we reach here, pt_exist=1 and len>=10, so we have touch data to read
+    // If we reach here, we have touch data or gesture to read
     // Don't gate by INT here - status register is the source of truth
 
     // Read first packet via HDP and parse
@@ -271,34 +284,124 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
     // Now parse the data if read was successful
     if (!read_ok) return false;
 
-    uint8_t b5 = buf[5];
-    uint8_t b6 = buf[6];
-    uint8_t b7 = buf[7];
-    uint8_t w  = buf[8];
+    // Check packet type (first byte after 4-byte header)
+    uint8_t check_id = buf[4];
 
-    if (w == 0) return false;  // Invalid touch weight, but INT already cleared above
+    // Reset touch data
+    if (touch_data) {
+        touch_data->point_count = 0;
+        touch_data->gesture = SPD2010_GESTURE_NONE;
+    }
 
-    uint16_t px = (uint16_t)(((b7 & 0xF0) << 4) | b5);
-    uint16_t py = (uint16_t)(((b7 & 0x0F) << 8) | b6);
+    // Parse touch points (check_id <= 0x0A indicates touch point data)
+    if ((check_id <= 0x0A) && pt_exist) {
+        uint8_t point_count = (read_len - 4) / 6;  // Each point is 6 bytes
+        if (point_count > 10) point_count = 10;    // Max 10 points
 
-    if (x) *x = px;
-    if (y) *y = py;
+        if (touch_data) {
+            touch_data->point_count = point_count;
+            touch_data->gesture = SPD2010_GESTURE_NONE;
 
-    return true;
+            // Parse all touch points
+            for (uint8_t i = 0; i < point_count; i++) {
+                uint8_t offset = i * 6;
+                touch_data->points[i].id = buf[4 + offset];
+                touch_data->points[i].x = (((buf[7 + offset] & 0xF0) << 4) | buf[5 + offset]);
+                touch_data->points[i].y = (((buf[7 + offset] & 0x0F) << 8) | buf[6 + offset]);
+                touch_data->points[i].weight = buf[8 + offset];
+            }
+
+            // Track down/up events for gesture recognition
+            if (point_count > 0) {
+                if ((touch_data->points[0].weight != 0) && (!touch_data->down)) {
+                    touch_data->down = true;
+                    touch_data->up = false;
+                    touch_data->down_x = touch_data->points[0].x;
+                    touch_data->down_y = touch_data->points[0].y;
+                } else if ((touch_data->points[0].weight == 0) && (touch_data->down)) {
+                    touch_data->up = true;
+                    touch_data->down = false;
+                    touch_data->up_x = touch_data->points[0].x;
+                    touch_data->up_y = touch_data->points[0].y;
+                }
+            }
+        }
+
+        return (point_count > 0);
+    }
+    // Parse gesture (check_id == 0xF6 indicates gesture data)
+    else if ((check_id == 0xF6) && gesture_flag) {
+        if (touch_data) {
+            touch_data->point_count = 0;
+            touch_data->up = false;
+            touch_data->down = false;
+            touch_data->gesture = (spd2010_gesture_t)(buf[6] & 0x07);
+
+            ESP_LOGI(TAG, "Gesture detected: 0x%02x", touch_data->gesture);
+        }
+        return false;  // Gesture doesn't count as "pressed"
+    }
+
+    return false;
+}
+
+// Public API: Read full touch data including all points and gestures
+bool spd2010_touch_read_full(spd2010_touch_data_t *data)
+{
+    if (!data) return false;
+    return spd2010_touch_read_internal(data);
+}
+
+// Public API: Read first touch point only (backward compatible)
+bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
+{
+    spd2010_touch_data_t data = {0};
+    bool pressed = spd2010_touch_read_internal(&data);
+
+    if (pressed && data.point_count > 0) {
+        if (x) *x = data.points[0].x;
+        if (y) *y = data.points[0].y;
+        return true;
+    }
+
+    return false;
 }
 
 void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    uint16_t x=0, y=0;
-    bool pressed = spd2010_touch_read_first(&x, &y);
-    if (pressed) {
+
+    // Read full touch data including gestures
+    bool pressed = spd2010_touch_read_internal(&s_touch_state);
+
+    if (pressed && s_touch_state.point_count > 0) {
         data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = x;
-        data->point.y = y;
-        ESP_LOGI(TAG, "Touch PRESSED x=%u y=%u", (unsigned)x, (unsigned)y);
+        data->point.x = s_touch_state.points[0].x;
+        data->point.y = s_touch_state.points[0].y;
+        ESP_LOGI(TAG, "Touch PRESSED x=%u y=%u (points=%u)",
+                 (unsigned)s_touch_state.points[0].x,
+                 (unsigned)s_touch_state.points[0].y,
+                 (unsigned)s_touch_state.point_count);
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+
+        // Log gestures when detected
+        if (s_touch_state.gesture != SPD2010_GESTURE_NONE) {
+            const char *gesture_name = "UNKNOWN";
+            switch (s_touch_state.gesture) {
+                case SPD2010_GESTURE_SWIPE_UP: gesture_name = "SWIPE_UP"; break;
+                case SPD2010_GESTURE_SWIPE_DOWN: gesture_name = "SWIPE_DOWN"; break;
+                case SPD2010_GESTURE_SWIPE_LEFT: gesture_name = "SWIPE_LEFT"; break;
+                case SPD2010_GESTURE_SWIPE_RIGHT: gesture_name = "SWIPE_RIGHT"; break;
+                case SPD2010_GESTURE_ZOOM_IN: gesture_name = "ZOOM_IN"; break;
+                case SPD2010_GESTURE_ZOOM_OUT: gesture_name = "ZOOM_OUT"; break;
+                case SPD2010_GESTURE_ROTATE: gesture_name = "ROTATE"; break;
+                default: break;
+            }
+            ESP_LOGI(TAG, "Gesture: %s (0x%02x)", gesture_name, s_touch_state.gesture);
+            s_touch_state.gesture = SPD2010_GESTURE_NONE;  // Clear after logging
+        }
+
         // Only log release events occasionally to avoid spam
         static int release_count = 0;
         if (++release_count % 100 == 0) {
