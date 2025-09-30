@@ -3,6 +3,8 @@
 #include <esp_check.h>
 #include <string.h>
 #include <esp_rom_sys.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char *TAG = "SPD2010_VND";
 static i2c_master_dev_handle_t s_dev = NULL;
@@ -173,12 +175,14 @@ static bool spd2010_touch_read_internal(spd2010_touch_data_t *touch_data)
 {
     if (!s_dev) return false;
 
-    // If controller is known-ready and INT is high (no new data), skip I2C entirely
-    if (s_ready && s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) != 0) {
-        return false;
+    // Optimization: If INT is high and we were not pressed, skip I2C read
+    // But if we were pressed, always read to detect release
+    static bool s_was_touched = false;
+    if (s_ready && s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) != 0 && !s_was_touched) {
+        return false;  // No new data and not tracking a touch
     }
 
-    // Read status
+    // Read status register
     uint8_t s[4];
     if (rd16(REG_STATUS_LEN, s, sizeof(s)) != ESP_OK) return false;
 
@@ -327,7 +331,9 @@ static bool spd2010_touch_read_internal(spd2010_touch_data_t *touch_data)
             }
         }
 
-        return (point_count > 0);
+        bool has_touch = (point_count > 0);
+        s_was_touched = has_touch;  // Update tracking flag
+        return has_touch;
     }
     // Parse gesture (check_id == 0xF6 indicates gesture data)
     else if ((check_id == 0xF6) && gesture_flag) {
@@ -339,9 +345,11 @@ static bool spd2010_touch_read_internal(spd2010_touch_data_t *touch_data)
 
             ESP_LOGI(TAG, "Gesture detected: 0x%02x", touch_data->gesture);
         }
+        s_was_touched = false;  // Gesture doesn't count as touch
         return false;  // Gesture doesn't count as "pressed"
     }
 
+    s_was_touched = false;  // No touch data
     return false;
 }
 
@@ -367,9 +375,23 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
     return false;
 }
 
+// External functions to access Application slideshow control
+extern bool app_is_slideshow_running(void);
+extern void app_slideshow_next(void);
+extern void app_slideshow_prev(void);
+
 void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
+
+    // Static variables for swipe detection
+    static bool s_was_pressed = false;
+    static uint16_t s_down_x = 0, s_down_y = 0;
+    static uint16_t s_last_x = 0, s_last_y = 0;
+
+    // Swipe cooldown to prevent rapid consecutive triggers
+    static TickType_t s_last_swipe_time = 0;
+    const TickType_t kSwipeCooldown = pdMS_TO_TICKS(1200);  // 1200ms cooldown
 
     // Read full touch data including gestures
     bool pressed = spd2010_touch_read_internal(&s_touch_state);
@@ -378,14 +400,79 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = s_touch_state.points[0].x;
         data->point.y = s_touch_state.points[0].y;
-        ESP_LOGI(TAG, "Touch PRESSED x=%u y=%u (points=%u)",
-                 (unsigned)s_touch_state.points[0].x,
-                 (unsigned)s_touch_state.points[0].y,
-                 (unsigned)s_touch_state.point_count);
+
+        // Track touch down position
+        if (!s_was_pressed) {
+            s_was_pressed = true;
+            s_down_x = s_touch_state.points[0].x;
+            s_down_y = s_touch_state.points[0].y;
+            ESP_LOGI(TAG, "Touch DOWN at x=%u y=%u", s_down_x, s_down_y);
+        }
+
+        // Update last position for swipe calculation
+        s_last_x = s_touch_state.points[0].x;
+        s_last_y = s_touch_state.points[0].y;
+
+        // Log touch movement for debugging (only when position changes significantly)
+        static uint16_t last_log_x = 0, last_log_y = 0;
+        if (abs((int)s_last_x - (int)last_log_x) > 100 || abs((int)s_last_y - (int)last_log_y) > 100) {
+            ESP_LOGD(TAG, "Touch MOVE x=%u y=%u (dx=%d dy=%d)",
+                     s_last_x, s_last_y,
+                     (int)s_last_x - (int)s_down_x,
+                     (int)s_last_y - (int)s_down_y);
+            last_log_x = s_last_x;
+            last_log_y = s_last_y;
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
 
-        // Log gestures when detected
+        // Detect swipe gesture on touch release
+        if (s_was_pressed) {
+            s_was_pressed = false;
+
+            // Calculate swipe distance
+            int dx = (int)s_last_x - (int)s_down_x;
+            int dy = (int)s_last_y - (int)s_down_y;
+
+            // Always log touch release with swipe info for debugging
+            ESP_LOGI(TAG, "Touch UP: down=(%u,%u) last=(%u,%u) dx=%d dy=%d",
+                     s_down_x, s_down_y, s_last_x, s_last_y, dx, dy);
+
+            // Swipe threshold in display coordinates (412x412 pixels)
+            // ~100 pixels = about 1/4 screen width, comfortable swipe distance
+            const int kSwipeThreshold = 100;
+
+            // Check if horizontal swipe is dominant and exceeds threshold
+            if (abs(dx) > kSwipeThreshold && abs(dx) > abs(dy)) {
+                // Check cooldown to prevent rapid consecutive swipes
+                TickType_t now = xTaskGetTickCount();
+                if (now - s_last_swipe_time > kSwipeCooldown) {
+                    if (app_is_slideshow_running()) {
+                        if (dx < 0) {
+                            // Swipe left (right to left) -> Next
+                            ESP_LOGI(TAG, "Swipe LEFT detected (dx=%d) -> SlideShowNext", dx);
+                            app_slideshow_next();
+                            s_last_swipe_time = now;  // Update cooldown timer
+                        } else {
+                            // Swipe right (left to right) -> Previous
+                            ESP_LOGI(TAG, "Swipe RIGHT detected (dx=%d) -> SlideShowPrev", dx);
+                            app_slideshow_prev();
+                            s_last_swipe_time = now;  // Update cooldown timer
+                        }
+                    } else {
+                        ESP_LOGI(TAG, "Swipe detected but slideshow not running (dx=%d, dy=%d)", dx, dy);
+                    }
+                } else {
+                    ESP_LOGD(TAG, "Swipe ignored (cooldown: %u ms remaining)",
+                             (unsigned)((kSwipeCooldown - (now - s_last_swipe_time)) * portTICK_PERIOD_MS));
+                }
+            } else {
+                ESP_LOGD(TAG, "Touch UP: swipe too small (threshold=%d, |dx|=%d, |dy|=%d)",
+                         kSwipeThreshold, abs(dx), abs(dy));
+            }
+        }
+
+        // Log hardware gestures when detected (from SPD2010 chip)
         if (s_touch_state.gesture != SPD2010_GESTURE_NONE) {
             const char *gesture_name = "UNKNOWN";
             switch (s_touch_state.gesture) {
@@ -398,7 +485,7 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                 case SPD2010_GESTURE_ROTATE: gesture_name = "ROTATE"; break;
                 default: break;
             }
-            ESP_LOGI(TAG, "Gesture: %s (0x%02x)", gesture_name, s_touch_state.gesture);
+            ESP_LOGI(TAG, "Hardware Gesture: %s (0x%02x)", gesture_name, s_touch_state.gesture);
             s_touch_state.gesture = SPD2010_GESTURE_NONE;  // Clear after logging
         }
 

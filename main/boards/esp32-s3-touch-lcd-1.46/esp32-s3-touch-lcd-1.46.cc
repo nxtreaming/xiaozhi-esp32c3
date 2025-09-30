@@ -127,7 +127,7 @@ private:
             [](void* arg){
                 auto self = static_cast<CustomBoard*>(arg);
                 const float kGyroTriggerDps = 35.0f;            // 触发阈值（dps）
-                const TickType_t kCooldown = pdMS_TO_TICKS(800); // 冷却时间
+                const TickType_t kCooldown = pdMS_TO_TICKS(1200); // 冷却时间 1200ms
                 static TickType_t last_trigger = 0;
                 int fail_count = 0;
                 for(;;) {
