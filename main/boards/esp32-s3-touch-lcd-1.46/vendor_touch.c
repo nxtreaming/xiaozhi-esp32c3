@@ -216,52 +216,73 @@ bool spd2010_touch_read_first(uint16_t *x, uint16_t *y)
         return false;
     }
 
-    // Optional INT gating only when CPU is running (optimization)
-    if (s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) != 0 && cpu_run) {
+    // Check if there's actually touch data before proceeding
+    if (!pt_exist || read_len < 10) {
+        // No touch data, safe to skip
+        // Optional: clear INT if it's asserted but no valid data
+        if (cpu_run && s_int_gpio != GPIO_NUM_NC && gpio_get_level(s_int_gpio) == 0) {
+            write_clear_int();
+        }
         return false;
     }
 
-    if (!pt_exist || read_len < 10) {
-        if (cpu_run) write_clear_int();
-        return false;
-    }
+    // If we reach here, pt_exist=1 and len>=10, so we have touch data to read
+    // Don't gate by INT here - status register is the source of truth
 
     // Read first packet via HDP and parse
     uint8_t buf[4 + 10 * 6] = {0};
-    if (rd16(REG_HDP, buf, read_len) != ESP_OK) return false;
+    bool read_ok = (rd16(REG_HDP, buf, read_len) == ESP_OK);
 
-    // Parse first touch point according to SPD2010 format
+    // CRITICAL: Always check HDP_STATUS and clear INT after reading HDP,
+    // even if the read failed or data is invalid. Otherwise the chip gets stuck.
+    uint8_t hs[8];
+    bool status_ok = (rd16(REG_HDP_STATUS, hs, sizeof(hs)) == ESP_OK);
+
+    if (status_ok) {
+        uint8_t status = hs[5];
+        uint16_t next_len = (uint16_t)(hs[2] | (hs[3] << 8));
+
+        if (status == 0x82) {
+            // Data ready and complete, clear INT
+            write_clear_int();
+        } else if (status == 0x00) {
+            // More data pending, drain it
+            if (next_len > 0 && next_len < 256) {
+                uint8_t tmp[256];
+                size_t to_read = next_len > sizeof(tmp) ? sizeof(tmp) : next_len;
+                rd16(REG_HDP, tmp, to_read);
+                // Check status again after draining
+                if (rd16(REG_HDP_STATUS, hs, sizeof(hs)) == ESP_OK && hs[5] == 0x82) {
+                    write_clear_int();
+                }
+            } else {
+                // Invalid next_len, force clear to recover
+                write_clear_int();
+            }
+        } else {
+            // Unknown status, force clear to avoid stuck
+            write_clear_int();
+        }
+    } else {
+        // Can't read HDP_STATUS, force clear INT to recover
+        write_clear_int();
+    }
+
+    // Now parse the data if read was successful
+    if (!read_ok) return false;
+
     uint8_t b5 = buf[5];
     uint8_t b6 = buf[6];
     uint8_t b7 = buf[7];
     uint8_t w  = buf[8];
 
-    if (w == 0) return false;
+    if (w == 0) return false;  // Invalid touch weight, but INT already cleared above
 
     uint16_t px = (uint16_t)(((b7 & 0xF0) << 4) | b5);
     uint16_t py = (uint16_t)(((b7 & 0x0F) << 8) | b6);
 
     if (x) *x = px;
     if (y) *y = py;
-
-    // After reading HDP, follow demo logic to handle HDP status and INT
-    uint8_t hs[8];
-    if (rd16(REG_HDP_STATUS, hs, sizeof(hs)) == ESP_OK) {
-        uint8_t status = hs[5];
-        uint16_t next_len = (uint16_t)(hs[2] | (hs[3] << 8));
-        if (status == 0x82) {
-            // Clear INT
-            write_clear_int();
-        } else if (status == 0x00 && next_len > 0) {
-            // Read remaining data then check again
-            uint8_t tmp[32];
-            size_t to_read = next_len > sizeof(tmp) ? sizeof(tmp) : next_len;
-            rd16(REG_HDP, tmp, to_read);
-            if (rd16(REG_HDP_STATUS, hs, sizeof(hs)) == ESP_OK) {
-                if (hs[5] == 0x82) write_clear_int();
-            }
-        }
-    }
 
     return true;
 }
