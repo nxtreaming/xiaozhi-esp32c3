@@ -127,7 +127,7 @@ private:
             [](void* arg){
                 auto self = static_cast<CustomBoard*>(arg);
                 const float kGyroTriggerDps = 35.0f;            // 触发阈值（dps）
-                const TickType_t kCooldown = pdMS_TO_TICKS(1200); // 冷却时间 1200ms
+                const TickType_t kCooldown = pdMS_TO_TICKS(2000); // 冷却时间 2000ms (allow GIF cleanup)
                 static TickType_t last_trigger = 0;
                 int fail_count = 0;
                 for(;;) {
@@ -148,32 +148,38 @@ private:
 
                     // 圆盘设备：主要使用 X/Y 轴旋转作为手势依据
                     // 策略：取 X/Y 中幅度更大的轴作为本次判定轴；正向触发下一张，反向触发上一张
-                    if (xTaskGetTickCount() - last_trigger > kCooldown) {
+                    TickType_t now = xTaskGetTickCount();
+                    TickType_t elapsed = now - last_trigger;
+                    if (elapsed > kCooldown) {
                         float ax = g.x, ay = g.y;
                         // 避免引入 <math.h>，用平方比较幅度大小
                         if ((ax * ax) >= (ay * ay)) {
                             if (ax > kGyroTriggerDps) {
-                                if (Application::GetInstance().IsSlideShowRunning())
+                                if (Application::GetInstance().IsSlideShowRunning()) {
                                     Application::GetInstance().SlideShowNext();
-                                ESP_LOGI("IMU", "Gesture: NEXT by X (gx=%.1f)", ax);
-                                last_trigger = xTaskGetTickCount();
+                                    ESP_LOGI("IMU", "Gesture: NEXT by X (gx=%.1f, elapsed=%u ms)", ax, (unsigned)(elapsed * portTICK_PERIOD_MS));
+                                    last_trigger = now;
+                                }
                             } else if (ax < -kGyroTriggerDps) {
-                                if (Application::GetInstance().IsSlideShowRunning())
+                                if (Application::GetInstance().IsSlideShowRunning()) {
                                     Application::GetInstance().SlideShowPrev();
-                                ESP_LOGI("IMU", "Gesture: PREV by X (gx=%.1f)", ax);
-                                last_trigger = xTaskGetTickCount();
+                                    ESP_LOGI("IMU", "Gesture: PREV by X (gx=%.1f, elapsed=%u ms)", ax, (unsigned)(elapsed * portTICK_PERIOD_MS));
+                                    last_trigger = now;
+                                }
                             }
                         } else {
                             if (ay > kGyroTriggerDps) {
-                                if (Application::GetInstance().IsSlideShowRunning())
+                                if (Application::GetInstance().IsSlideShowRunning()) {
                                     Application::GetInstance().SlideShowNext();
-                                ESP_LOGI("IMU", "Gesture: NEXT by Y (gy=%.1f)", ay);
-                                last_trigger = xTaskGetTickCount();
+                                    ESP_LOGI("IMU", "Gesture: NEXT by Y (gy=%.1f, elapsed=%u ms)", ay, (unsigned)(elapsed * portTICK_PERIOD_MS));
+                                    last_trigger = now;
+                                }
                             } else if (ay < -kGyroTriggerDps) {
-                                if (Application::GetInstance().IsSlideShowRunning())
+                                if (Application::GetInstance().IsSlideShowRunning()) {
                                     Application::GetInstance().SlideShowPrev();
-                                ESP_LOGI("IMU", "Gesture: PREV by Y (gy=%.1f)", ay);
-                                last_trigger = xTaskGetTickCount();
+                                    ESP_LOGI("IMU", "Gesture: PREV by Y (gy=%.1f, elapsed=%u ms)", ay, (unsigned)(elapsed * portTICK_PERIOD_MS));
+                                    last_trigger = now;
+                                }
                             }
                         }
                     }

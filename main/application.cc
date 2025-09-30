@@ -1473,6 +1473,9 @@ void Application::SlideShow()
                 int skip = slideshow_skip_.exchange(0);
                 if (skip != 0) {
                     index += skip; // -1 prev, +1 next (from gesture)
+                    // Add delay to allow previous GIF cleanup to complete
+                    // This prevents concurrent decoder tasks from corrupting heap
+                    vTaskDelay(pdMS_TO_TICKS(300));
                     goto next_item;
                 }
                 // Keep current GIF looping until user swipes to change item

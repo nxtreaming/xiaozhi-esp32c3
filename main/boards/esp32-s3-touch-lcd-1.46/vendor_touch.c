@@ -390,8 +390,9 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     static uint16_t s_last_x = 0, s_last_y = 0;
 
     // Swipe cooldown to prevent rapid consecutive triggers
+    // Need longer cooldown to allow GIF cleanup to complete (especially for large GIFs)
     static TickType_t s_last_swipe_time = 0;
-    const TickType_t kSwipeCooldown = pdMS_TO_TICKS(1200);  // 1200ms cooldown
+    const TickType_t kSwipeCooldown = pdMS_TO_TICKS(2000);  // 2000ms cooldown
 
     // Read full touch data including gestures
     bool pressed = spd2010_touch_read_internal(&s_touch_state);
@@ -446,7 +447,13 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             if (abs(dx) > kSwipeThreshold && abs(dx) > abs(dy)) {
                 // Check cooldown to prevent rapid consecutive swipes
                 TickType_t now = xTaskGetTickCount();
-                if (now - s_last_swipe_time > kSwipeCooldown) {
+                TickType_t elapsed = now - s_last_swipe_time;
+
+                ESP_LOGI(TAG, "Swipe detected: dx=%d dy=%d, elapsed=%u ms, cooldown=%u ms",
+                         dx, dy, (unsigned)(elapsed * portTICK_PERIOD_MS),
+                         (unsigned)(kSwipeCooldown * portTICK_PERIOD_MS));
+
+                if (elapsed > kSwipeCooldown) {
                     if (app_is_slideshow_running()) {
                         if (dx < 0) {
                             // Swipe left (right to left) -> Next
@@ -463,8 +470,8 @@ void spd2010_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                         ESP_LOGI(TAG, "Swipe detected but slideshow not running (dx=%d, dy=%d)", dx, dy);
                     }
                 } else {
-                    ESP_LOGD(TAG, "Swipe ignored (cooldown: %u ms remaining)",
-                             (unsigned)((kSwipeCooldown - (now - s_last_swipe_time)) * portTICK_PERIOD_MS));
+                    ESP_LOGI(TAG, "Swipe IGNORED (cooldown: %u ms remaining)",
+                             (unsigned)((kSwipeCooldown - elapsed) * portTICK_PERIOD_MS));
                 }
             } else {
                 ESP_LOGD(TAG, "Touch UP: swipe too small (threshold=%d, |dx|=%d, |dy|=%d)",

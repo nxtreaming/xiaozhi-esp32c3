@@ -1242,8 +1242,11 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
             ESP_LOGI(TAG, "GIF reused without restart");
             return;
         }
-        // Different content: keep current image visible and swap source after new controller ready
+        // Different content: stop old GIF asynchronously to avoid blocking LVGL task
+        ESP_LOGI(TAG, "Stopping previous GIF (async)");
         old_controller = std::move(gif_controller_);
+        // Trigger async cleanup - old_controller will be destroyed when it goes out of scope
+        // but we add a small delay before starting new GIF to allow cleanup to progress
     }
 
     lv_image_dsc_t src{};
@@ -1276,12 +1279,22 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
         lv_obj_add_flag(gif_img_b_, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // CRITICAL: Stop old GIF BEFORE starting new one to prevent concurrent decoder tasks
+    // Just set playing_ = false, the decoder task will exit on its own
+    // The destructor will handle full cleanup asynchronously
+    if (old_controller) {
+        ESP_LOGI(TAG, "Stopping old GIF playback");
+        old_controller->Stop();  // Sets playing_ = false, non-blocking
+    }
+
     // Render on the inactive view, keep current visible until swap
     lv_obj_t* target = (active_gif_view_ == 0 ? gif_img_b_ : gif_img_);
     lv_image_set_src(target, new_controller->image_dsc());
     new_controller->SetFrameCallback([this, target]() {
         if (target) { lv_obj_invalidate(target); }
     });
+
+    // Now safe to start new GIF (old one is stopped)
     new_controller->Start();
 
     SetGifPos(x, y);
@@ -1300,11 +1313,7 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
 
     ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
 
-    // Now it is safe to stop and release old controller without blanking
-    if (old_controller) {
-        old_controller->Stop();
-        old_controller.reset();
-    }
+    // old_controller will be destroyed here (async cleanup in destructor)
 }
 
 void LcdDisplay::HideGif() {
