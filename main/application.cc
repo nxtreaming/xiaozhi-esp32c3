@@ -1427,12 +1427,14 @@ void Application::SlideShowFromUrl()
             //"http://122.51.57.185:18080/412_Normal.gif",
             //"http://122.51.57.185:18080/412_think.gif",
             //"http://122.51.57.185:18080/412_angry.gif",
-            "http://122.51.57.185:18080/wink1.gif",
+            //"http://122.51.57.185:18080/wink1.gif",
             //"http://122.51.57.185:18080/wink2.gif",
+            "http://122.51.57.185:18080/jime.gif",
+            "http://122.51.57.185:18080/jime_cry.gif",
             "http://122.51.57.185:18080/g1.gif",
             "http://122.51.57.185:18080/g2.gif",
             //"http://122.51.57.185:18080/g3.gif",
-            "http://122.51.57.185:18080/g4.gif"
+            //"http://122.51.57.185:18080/g4.gif"
             //"http://122.51.57.185:18080/412_cheer.gif",
             //"http://122.51.57.185:18080/412_sadly.gif"
         };
@@ -1542,7 +1544,8 @@ void Application::SlideShowFromUrl()
 void Application::SlideShow()
 {
     // Default slideshow now uses Flash storage
-    SlideShowFromStorage();
+    //SlideShowFromStorage();
+    SlideShowFromUrl();
 }
 
 void Application::SlideShowFromStorage()
