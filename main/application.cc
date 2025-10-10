@@ -24,6 +24,11 @@
 #include <esp_crt_bundle.h>
 #include "YT_UART.h"
 #include "gif_test.h"
+
+extern "C"{
+#include "storage/gif_storage.h"
+}
+
 #define TAG "Application"
 
 static const char *const STATE_STRINGS[] = {
