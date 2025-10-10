@@ -19,6 +19,11 @@
 #include <freertos/task.h>
 #include <string.h>
 #include <lvgl.h>
+
+extern "C" {
+#include "storage/gif_storage.h"
+}
+
 #define TAG "LcdDisplay"
 
 // Color definitions for dark theme
@@ -1667,4 +1672,31 @@ void LcdDisplay::ShowGifFromUrl(const char* url, int x, int y) {
     }
 
     ESP_LOGI(TAG, "GIF download and display process completed");
+}
+
+void LcdDisplay::ShowGifFromFlash(const char* filename, int x, int y) {
+    if (filename == nullptr || strlen(filename) == 0) {
+        ESP_LOGE(TAG, "Invalid filename provided");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Loading GIF from Flash: %s", filename);
+
+    uint8_t* gif_data = nullptr;
+    size_t gif_size = 0;
+
+    // Read GIF from Flash storage
+    esp_err_t ret = gif_storage_read(filename, &gif_data, &gif_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read GIF from Flash: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Successfully loaded GIF from Flash: %s (%zu bytes)", filename, gif_size);
+
+    // Display the GIF using managed buffer (transfers ownership)
+    ShowGifWithManagedBuffer(gif_data, gif_size, x, y);
+
+    // Note: gif_data ownership is transferred to ShowGifWithManagedBuffer
+    // Do not free it here
 }

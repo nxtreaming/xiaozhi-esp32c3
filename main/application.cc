@@ -1189,6 +1189,24 @@ void Application::ShowGifFromUrl(const char* url, int x, int y)
     }
 }
 
+void Application::ShowGifFromFlash(const char* filename, int x, int y)
+{
+    if (filename == nullptr || strlen(filename) == 0) {
+        ESP_LOGE(TAG, "Invalid filename provided for GIF display");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Application: Loading GIF from Flash: %s", filename);
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        ESP_LOGI(TAG, "Application: Showing GIF from Flash");
+        display->ShowGifFromFlash(filename, x, y);
+    } else {
+        ESP_LOGE(TAG, "Display not available for GIF Flash display");
+    }
+}
+
 void Application::HideGif()
 {
     auto display = Board::GetInstance().GetDisplay();
@@ -1359,15 +1377,32 @@ void Application::SlideShowPrev()
 extern "C" bool app_is_slideshow_running(void) {
     return Application::GetInstance().IsSlideShowRunning();
 }
+
 extern "C" void app_slideshow_next(void) {
     Application::GetInstance().SlideShowNext();
 }
+
 extern "C" void app_slideshow_prev(void) {
     Application::GetInstance().SlideShowPrev();
 }
 
+extern "C" void app_slideshow(void) {
+    Application::GetInstance().SlideShow();
+}
 
-void Application::SlideShow()
+extern "C" void app_slideshow_from_url(void) {
+    Application::GetInstance().SlideShowFromUrl();
+}
+
+extern "C" void app_slideshow_from_storage(void) {
+    Application::GetInstance().SlideShowFromStorage();
+}
+
+extern "C" void app_stop_slideshow(void) {
+    Application::GetInstance().StopSlideShow();
+}
+
+void Application::SlideShowFromUrl()
 {
     // Prevent concurrent slideshows
     if (slideshow_running_) {
@@ -1496,6 +1531,108 @@ void Application::SlideShow()
         stop_slideshow_ = false;
         slideshow_running_ = false;
         ESP_LOGI(TAG, "SlideShow finished");
+    });
+}
+
+void Application::SlideShow()
+{
+    // Default slideshow now uses Flash storage
+    SlideShowFromStorage();
+}
+
+void Application::SlideShowFromStorage()
+{
+    // Prevent concurrent slideshows
+    if (slideshow_running_) {
+        ESP_LOGW(TAG, "SlideShow already running, ignore request");
+        return;
+    }
+    stop_slideshow_ = false;
+    slideshow_running_ = true;
+
+    background_task_->Schedule([this]() {
+        ESP_LOGI(TAG, "SlideShowFromStorage started");
+
+        // Ensure no decoding during preparation phase
+        if (auto display = Board::GetInstance().GetDisplay()) {
+            display->HideGif();
+        }
+
+        // Collect all GIF files from storage
+        std::vector<std::string> gif_files;
+
+        auto callback = [](const char* filename, size_t size, void* user_data) {
+            auto* files = static_cast<std::vector<std::string>*>(user_data);
+            // Only add .gif files
+            if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
+                files->push_back(filename);
+                ESP_LOGI("SlideShow", "Found GIF: %s (%zu bytes)", filename, size);
+            }
+        };
+
+        esp_err_t ret = gif_storage_list(callback, &gif_files);
+        if (ret != ESP_OK || gif_files.empty()) {
+            ESP_LOGE(TAG, "No GIF files found in storage or storage error: %s", esp_err_to_name(ret));
+            if (auto display = Board::GetInstance().GetDisplay()) display->HideGif();
+            stop_slideshow_ = false;
+            slideshow_running_ = false;
+            ESP_LOGI(TAG, "SlideShowFromStorage finished (no files)");
+            return;
+        }
+
+        ESP_LOGI(TAG, "Found %d GIF files in storage", gif_files.size());
+
+        // Display phase - load and show GIFs one by one
+        int index = 0;
+        while (!stop_slideshow_) {
+            if (device_state_ != kDeviceStateIdle) {
+                ESP_LOGW(TAG, "Device state changed, abort SlideShowFromStorage");
+                stop_slideshow_ = true;
+                break;
+            }
+
+            // Normalize index
+            if (index < 0) index = (gif_files.size() - 1);
+            if (index >= static_cast<int>(gif_files.size())) index = 0;
+
+            const std::string& filename = gif_files[index];
+            ESP_LOGI(TAG, "SlideShowFromStorage showing %d/%d: %s", index + 1, gif_files.size(), filename.c_str());
+
+            // Load and display GIF from storage
+            if (auto display = Board::GetInstance().GetDisplay()) {
+                display->ShowGifFromFlash(filename.c_str(), 0, 0);
+            }
+
+            // Wait for user swipe to change item; do not auto-advance when GIF finishes
+            while (!stop_slideshow_) {
+                if (device_state_ != kDeviceStateIdle) {
+                    ESP_LOGW(TAG, "Device state changed, abort SlideShowFromStorage");
+                    stop_slideshow_ = true;
+                    break;
+                }
+                int skip = slideshow_skip_.exchange(0);
+                if (skip != 0) {
+                    index += skip; // -1 prev, +1 next (from gesture)
+                    // Add delay to allow previous GIF cleanup to complete
+                    // This prevents concurrent decoder tasks from corrupting heap
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    goto next_item;
+                }
+                // Keep current GIF looping until user swipes to change item
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            // no automatic index change here; wait strictly for gestures
+        next_item:
+            continue;
+        }
+
+        // Clean up display
+        if (auto display = Board::GetInstance().GetDisplay())
+            display->HideGif();
+
+        stop_slideshow_ = false;
+        slideshow_running_ = false;
+        ESP_LOGI(TAG, "SlideShowFromStorage finished");
     });
 }
 

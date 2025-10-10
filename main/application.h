@@ -203,13 +203,16 @@ public:
     // GIF display methods
     void ShowGif(const uint8_t* gif_data, size_t gif_size, int x = 0, int y = 0);
     void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
+    void ShowGifFromFlash(const char* filename, int x = 0, int y = 0);
     void HideGif();
     bool IsGifPlaying() const;
 
     bool IsSlideShowRunning() const;
 
     // GIF slideshow
-    void SlideShow();
+    void SlideShow();                // Default: from Flash storage
+    void SlideShowFromUrl();         // From network URLs
+    void SlideShowFromStorage();     // From Flash storage (same as SlideShow)
     void StopSlideShow();
     // Control slideshow manually (e.g., touch gestures)
     void SlideShowNext();

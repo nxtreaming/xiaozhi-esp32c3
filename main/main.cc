@@ -17,6 +17,8 @@
 #include <esp_efuse_table.h>
 #include "YT_UART.h"
 #include "PFS123.h"
+#include "storage/gif_storage.h"
+
 #define TAG "main"
 void set_gpio() {
 #ifdef CONFIG_IDF_TARGET_ESP32C3
@@ -51,6 +53,13 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ret);
     set_gpio(); //初始化电平
     gpio_set_level(GPIO_NUM_11, 1); //功放角失能  1
+
+    // Initialize GIF storage
+    ret = gif_storage_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "GIF storage initialization failed: %s (partition may not exist)", esp_err_to_name(ret));
+    }
+
     // Launch the application
     Application::GetInstance().Start();
     // 

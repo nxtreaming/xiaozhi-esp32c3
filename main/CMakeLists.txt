@@ -23,10 +23,10 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "YT_UART.cc"
             "PFS123.cc"
             "gif_test.cc"
-            "gif_url_test_example.cc"
+            "storage/gif_storage.c"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing" "storage")
 
 # 添加 IOT 相关文件
 file(GLOB IOT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/iot/things/*.cc)

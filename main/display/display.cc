@@ -278,6 +278,11 @@ void Display::ShowGifFromUrl(const char* url, int x, int y) {
     // Override in derived classes
 }
 
+void Display::ShowGifFromFlash(const char* filename, int x, int y) {
+    // Default implementation - does nothing
+    // Override in derived classes
+}
+
 void Display::HideGif() {
     // Default implementation - does nothing
     // Override in derived classes
