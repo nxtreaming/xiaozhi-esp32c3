@@ -6,6 +6,10 @@
 #include "button.h"
 #include "config.h"
 #include "iot/thing_manager.h"
+#if CONFIG_USE_WAKE_WORD_DETECT
+#include "iot/image_upload_control.h"
+#include "iot/image_storage_control.h"
+#endif
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -289,10 +293,12 @@ private:
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 self->ResetWifiConfiguration();
             }
-            app.ToggleChatState();
+            // 离线模式：按键控制图片管理
+            app.HandleOfflineButtonPress();
         }, this);
         iot_button_register_cb(boot_btn, BUTTON_LONG_PRESS_START, [](void* button_handle, void* usr_data) {
-            // 长按无处理
+            // 离线模式：长按管理功能
+            Application::GetInstance().HandleOfflineButtonLongPress();
         }, this);
 
         btns_config.long_press_time = 5000;
@@ -326,6 +332,15 @@ private:
         auto& thing_manager = iot::ThingManager::GetInstance();
         thing_manager.AddThing(iot::CreateThing("Speaker"));
         thing_manager.AddThing(iot::CreateThing("Screen"));
+
+#if CONFIG_USE_WAKE_WORD_DETECT
+        // 只有在启用语音唤醒时才添加图片管理IoT控制
+        thing_manager.AddThing(iot::CreateImageUploadControl());
+        thing_manager.AddThing(iot::CreateImageStorageControl());
+        ESP_LOGI("Board", "Added image management IoT controls (voice mode)");
+#else
+        ESP_LOGI("Board", "Skipped image management IoT controls (offline mode)");
+#endif
     }
 
 public:

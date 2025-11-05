@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 static const char* TAG = "GifStorage";
 static bool s_initialized = false;
@@ -145,6 +146,45 @@ esp_err_t gif_storage_read(const char* filename, uint8_t** out_data, size_t* out
     return ESP_OK;
 }
 
+esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t size) {
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "GIF storage not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!filename || !data || size == 0) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Build full path
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, filename);
+
+    ESP_LOGI(TAG, "Writing file: %s (%zu bytes)", filepath, size);
+
+    // Open file for writing
+    FILE* f = fopen(filepath, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to create file: %s", filepath);
+        return ESP_FAIL;
+    }
+
+    // Write data
+    size_t written = fwrite(data, 1, size, f);
+    fclose(f);
+
+    if (written != size) {
+        ESP_LOGE(TAG, "Failed to write complete file: %s (wrote %zu of %zu bytes)", filepath, written, size);
+        // Try to remove incomplete file
+        unlink(filepath);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Successfully wrote file: %s (%zu bytes)", filename, size);
+    return ESP_OK;
+}
+
 bool gif_storage_exists(const char* filename) {
     if (!s_initialized || !filename) {
         return false;
@@ -203,3 +243,29 @@ esp_err_t gif_storage_info(size_t* total_bytes, size_t* used_bytes) {
     return esp_spiffs_info(STORAGE_PARTITION_LABEL, total_bytes, used_bytes);
 }
 
+esp_err_t gif_storage_delete(const char* filename) {
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "GIF storage not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!filename) {
+        ESP_LOGE(TAG, "Invalid filename");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, filename);
+
+    if (unlink(filepath) != 0) {
+        ESP_LOGE(TAG, "Failed to delete file: %s", filename);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Deleted file: %s", filename);
+    return ESP_OK;
+}
+
+esp_err_t gif_storage_get_info(size_t* total_bytes, size_t* used_bytes) {
+    return gif_storage_info(total_bytes, used_bytes);
+}

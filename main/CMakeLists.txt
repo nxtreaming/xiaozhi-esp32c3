@@ -24,6 +24,9 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "PFS123.cc"
             "gif_test.cc"
             "storage/gif_storage.c"
+            "storage/gif_storage_cpp.cc"
+            "image_upload_server.cc"
+            "offline_image_manager.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/gif" "audio_codecs" "protocols" "audio_processing" "storage")
@@ -164,6 +167,9 @@ if(CONFIG_USE_AUDIO_PROCESSOR)
 endif()
 if(CONFIG_USE_WAKE_WORD_DETECT)
     list(APPEND SOURCES "audio_processing/wake_word_detect.cc")
+    # 语音模式下添加IoT控制文件
+    list(APPEND SOURCES "iot/image_upload_control.cc")
+    list(APPEND SOURCES "iot/image_storage_control.cc")
 endif()
 
 # 根据Kconfig选择语言目录

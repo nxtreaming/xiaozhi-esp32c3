@@ -24,6 +24,10 @@
 #include <esp_crt_bundle.h>
 #include "YT_UART.h"
 #include "gif_test.h"
+#include "image_upload_server.h"
+#include "storage/gif_storage.h"
+#include "offline_image_manager.h"
+#include "offline_image_manager.h"
 
 extern "C"{
 #include "storage/gif_storage.h"
@@ -313,6 +317,31 @@ void Application::PlaySound(const std::string_view &sound)
     codec->EnableOutput(true);
     // opus_decoder_->ResetState();
     // audio_decode_queue_.clear();
+    SetDecodeSampleRate(16000);
+    const char *data = sound.data();
+    size_t size = sound.size();
+
+    for (const char *p = data; p < data + size;)
+    {
+        auto p3 = (BinaryProtocol3 *)p;
+        p += sizeof(BinaryProtocol3);
+
+        auto payload_size = ntohs(p3->payload_size);
+        std::vector<uint8_t> opus;
+        opus.resize(payload_size);
+        memcpy(opus.data(), p3->payload, payload_size);
+        p += payload_size;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        audio_decode_queue_.emplace_back(std::move(opus));
+    }
+}
+
+void Application::PlaySound1(const std::string_view &sound)
+{
+    // PlaySound1 是 PlaySound 的变体，可能有不同的处理逻辑
+    auto codec = Board::GetInstance().GetAudioCodec();
+    codec->EnableOutput(true);
     SetDecodeSampleRate(16000);
     const char *data = sound.data();
     size_t size = sound.size();
@@ -665,6 +694,9 @@ void Application::Start()
 
     SetDeviceState(kDeviceStateIdle);  //xkDeviceStateIdle
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
+
+    // 初始化离线图片管理器
+    InitializeOfflineImageManager();
 
     // 启动完成后默认开启幻灯片，确保有 GIF 显示
     background_task_->Schedule([this]() {
@@ -1649,4 +1681,132 @@ void Application::StopSlideShow()
     if (!slideshow_running_) return;
     stop_slideshow_ = true;
     ESP_LOGI(TAG, "SlideShow stop requested");
+}
+
+bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
+    auto& server = ImageUploadServer::GetInstance();
+
+    if (server.IsRunning()) {
+        ESP_LOGW(TAG, "Image upload server already running");
+        return true;
+    }
+
+    // 设置图片接收回调
+    server.SetImageReceivedCallback([this](const uint8_t* data, size_t size, const std::string& filename) {
+        ESP_LOGI(TAG, "Received image: %s, size: %zu bytes", filename.c_str(), size);
+
+        // 1. 保存到Flash存储
+        esp_err_t ret = gif_storage_write(filename.c_str(), data, size);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Image saved to storage: %s", filename.c_str());
+
+            // 显示保存成功的通知
+            Schedule([this, filename]() {
+                auto display = Board::GetInstance().GetDisplay();
+                if (display) {
+                    std::string message = "图片已保存: " + filename;
+                    display->ShowNotification(message.c_str(), 3000);
+                }
+            });
+        } else {
+            ESP_LOGE(TAG, "Failed to save image to storage: %s", filename.c_str());
+
+            // 显示保存失败的通知
+            Schedule([this, filename]() {
+                auto display = Board::GetInstance().GetDisplay();
+                if (display) {
+                    std::string message = "保存失败: " + filename;
+                    display->ShowNotification(message.c_str(), 3000);
+                }
+            });
+        }
+
+        // 2. 如果是GIF文件，直接显示
+        if (filename.find(".gif") != std::string::npos || filename.find(".GIF") != std::string::npos) {
+            Schedule([this, data, size]() {
+                ShowGif(data, size, 0, 0);
+            });
+        }
+
+        // 3. 其他图片类型的处理（可扩展）
+        // 例如：静态图片可以转换后显示，或者发送给AI分析
+    });
+
+    bool success = server.Start(ssid_prefix);
+    if (success) {
+        ESP_LOGI(TAG, "Image upload server started");
+        ESP_LOGI(TAG, "SSID: %s", server.GetSsid().c_str());
+        ESP_LOGI(TAG, "Upload URL: %s", server.GetUploadUrl().c_str());
+
+        // 在显示屏上显示连接信息
+        auto display = Board::GetInstance().GetDisplay();
+        if (display) {
+            std::string message = "图片上传服务已启动\n";
+            message += "WiFi: " + server.GetSsid() + "\n";
+            message += "上传地址: " + server.GetUploadUrl();
+            display->ShowNotification(message.c_str(), 30000); // 显示30秒
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to start image upload server");
+    }
+
+    return success;
+}
+
+void Application::StopImageUploadServer() {
+    auto& server = ImageUploadServer::GetInstance();
+    server.Stop();
+    ESP_LOGI(TAG, "Image upload server stopped");
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->ShowNotification("图片上传服务已停止", 3000);
+    }
+}
+
+bool Application::IsImageUploadServerRunning() const {
+    return ImageUploadServer::GetInstance().IsRunning();
+}
+
+std::string Application::GetImageUploadServerInfo() const {
+    auto& server = ImageUploadServer::GetInstance();
+    if (!server.IsRunning()) {
+        return "图片上传服务未运行";
+    }
+
+    std::string info = "图片上传服务信息:\n";
+    info += "SSID: " + server.GetSsid() + "\n";
+    info += "上传地址: " + server.GetUploadUrl();
+    return info;
+}
+
+void Application::InitializeOfflineImageManager() {
+    ESP_LOGI(TAG, "Initializing offline image manager");
+
+    auto& manager = OfflineImageManager::GetInstance();
+
+    // 设置状态回调，用于在屏幕上显示消息
+    manager.SetStatusCallback([this](const std::string& message) {
+        Schedule([this, message]() {
+            auto display = Board::GetInstance().GetDisplay();
+            if (display) {
+                display->ShowNotification(message.c_str(), 3000);
+            }
+        });
+    });
+
+    manager.Initialize();
+    ESP_LOGI(TAG, "Offline image manager initialized");
+}
+
+void Application::HandleOfflineButtonPress() {
+    ESP_LOGI(TAG, "Handling offline button press");
+    auto& manager = OfflineImageManager::GetInstance();
+    manager.HandleButtonPress();
+}
+
+void Application::HandleOfflineButtonLongPress() {
+    ESP_LOGI(TAG, "Handling offline button long press");
+    auto& manager = OfflineImageManager::GetInstance();
+    manager.HandleButtonLongPress();
 }

@@ -40,8 +40,21 @@ esp_err_t gif_storage_deinit(void);
 esp_err_t gif_storage_read(const char* filename, uint8_t** out_data, size_t* out_size);
 
 /**
+ * @brief Write a file to storage
+ *
+ * @param filename Name of the file (e.g., "image.gif", "photo.jpg")
+ * @param data Pointer to the file data
+ * @param size Size of the file data
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t size);
+esp_err_t gif_storage_delete(const char* filename);
+esp_err_t gif_storage_get_info(size_t* total_bytes, size_t* used_bytes);
+
+/**
  * @brief Check if a GIF file exists in storage
- * 
+ *
  * @param filename Name of the GIF file
  * @return true if file exists, false otherwise
  */
@@ -70,6 +83,11 @@ esp_err_t gif_storage_info(size_t* total_bytes, size_t* used_bytes);
 
 #ifdef __cplusplus
 }
+
+// C++ wrapper functions (only available when compiled as C++)
+#include <vector>
+#include <string>
+esp_err_t gif_storage_list_files(std::vector<std::string>& files);
 #endif
 
 #endif // GIF_STORAGE_H
