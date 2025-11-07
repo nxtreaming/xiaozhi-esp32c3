@@ -18,9 +18,9 @@ import tempfile
 import shutil
 from pathlib import Path
 
-# Default partition configuration (should match partitions_16M.csv)
-DEFAULT_PARTITION_OFFSET = 0xD00000  # 13MB offset
-DEFAULT_PARTITION_SIZE = 0x300000    # 3MB size
+# Default partition configuration (should match partitions_16M_small_ota.csv)
+DEFAULT_PARTITION_OFFSET = 0xA00000  # 10MB offset
+DEFAULT_PARTITION_SIZE = 0x600000    # 6MB size
 DEFAULT_PARTITION_NAME = "storage"
 
 def find_idf_path():
