@@ -32,6 +32,7 @@ public:
     virtual void ShowGifFromUrl(const char* url, int x = 0, int y = 0);
     virtual void ShowGifFromFlash(const char* filename, int x = 0, int y = 0);
     virtual void HideGif();
+    virtual void DestroyGif() {} // Default implementation does nothing
     virtual bool IsGifPlaying() const;
 
     // virtual void SetupBluetoothUI();
