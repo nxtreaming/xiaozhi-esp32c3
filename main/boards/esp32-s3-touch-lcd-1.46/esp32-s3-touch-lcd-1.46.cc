@@ -187,7 +187,7 @@ private:
                             }
                         }
                     }
-                    vTaskDelay(pdMS_TO_TICKS(80));
+                    vTaskDelay(pdMS_TO_TICKS(120));
                 }
             },
             "imu_read_task", 4096, this, 2, nullptr
@@ -258,7 +258,13 @@ private:
         lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
         lv_indev_set_read_cb(indev, spd2010_lvgl_read_cb);
         lv_indev_set_disp(indev, lv_display_get_default());
+        // Reduce LVGL input polling rate to ease I2C bus pressure
+        lv_timer_t *indev_timer = lv_indev_get_read_timer(indev);
+        if (indev_timer) {
+            lv_timer_set_period(indev_timer, 50); // 50 ms (default is 33 ms)
+        }
     }
+
 
     void InitializeButtonsCustom() {
         gpio_reset_pin(BOOT_BUTTON_GPIO);

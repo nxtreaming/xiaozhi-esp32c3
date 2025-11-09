@@ -27,6 +27,15 @@ static spd2010_touch_data_t s_touch_state = {0};
 
 #define SPD2010_ADDR     0x53
 
+// I2C robustness knobs for SPD2010
+#ifndef SPD2010_I2C_TIMEOUT_MS
+#define SPD2010_I2C_TIMEOUT_MS 200
+#endif
+#ifndef SPD2010_I2C_RETRY
+#define SPD2010_I2C_RETRY 1
+#endif
+
+
 static esp_err_t wr16(uint16_t reg, const uint8_t *data, size_t len)
 {
     uint8_t buf[2 + 8];
@@ -34,15 +43,38 @@ static esp_err_t wr16(uint16_t reg, const uint8_t *data, size_t len)
     buf[0] = (uint8_t)(reg >> 8);
     buf[1] = (uint8_t)(reg & 0xFF);
     if (len) memcpy(buf + 2, data, len);
-    // Increase timeout to tolerate slow rise times on weak pull-ups
-    return i2c_master_transmit(s_dev, buf, 2 + len, 100);
+
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt <= SPD2010_I2C_RETRY; ++attempt) {
+        err = i2c_master_transmit(s_dev, buf, 2 + len, SPD2010_I2C_TIMEOUT_MS);
+        if (err == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (err != ESP_OK) {
+        static int s_failw;
+        if (((++s_failw) & 0x0F) == 1) {
+            ESP_LOGW(TAG, "I2C wr16 fail reg=0x%04X len=%u err=%s", reg, (unsigned)len, esp_err_to_name(err));
+        }
+    }
+    return err;
 }
 
 static esp_err_t rd16(uint16_t reg, uint8_t *data, size_t len)
 {
     uint8_t addr[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
-    // Increase timeout to tolerate slow rise times on weak pull-ups
-    return i2c_master_transmit_receive(s_dev, addr, 2, data, len, 100);
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt <= SPD2010_I2C_RETRY; ++attempt) {
+        err = i2c_master_transmit_receive(s_dev, addr, 2, data, len, SPD2010_I2C_TIMEOUT_MS);
+        if (err == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (err != ESP_OK) {
+        static int s_failr;
+        if (((++s_failr) & 0x0F) == 1) {
+            ESP_LOGW(TAG, "I2C rd16 fail reg=0x%04X len=%u err=%s", reg, (unsigned)len, esp_err_to_name(err));
+        }
+    }
+    return err;
 }
 
 // Some boards expect 16-bit payload as big-endian for write 'value'
@@ -84,7 +116,7 @@ esp_err_t spd2010_touch_init(i2c_master_bus_handle_t bus, gpio_num_t int_gpio)
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = SPD2010_ADDR,
         // Keep low speed to improve margins when pull-ups are weak
-        .scl_speed_hz = 50 * 1000,
+        .scl_speed_hz = 25 * 1000,
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(bus, &cfg, &s_dev), TAG, "add dev");
 

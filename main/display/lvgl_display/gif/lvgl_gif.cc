@@ -215,13 +215,19 @@ void LvglGif::TickOnce() {
         if (has_next == 0) {
             ESP_LOGI(TAG, "GIF reached trailer (loop_count=%d)", (int)gif_->loop_count);
         } else {
-            ESP_LOGI(TAG, "gd_get_frame returned error (%d); treating as end", has_next);
+            static int s_end_err_logs = 0;
+            if (((++s_end_err_logs) & 0x1F) == 1) {
+                ESP_LOGI(TAG, "gd_get_frame returned error (%d); treating as end", has_next);
+            }
         }
         if (force_infinite_) {
             gd_rewind(gif_);
             gif_->loop_count = 1; // keep single-pass scheme for manual infinite loop
             frame_index_ = 0;
-            ESP_LOGI(TAG, "GIF rewound for infinite loop (manual), loop_count=%d", (int)gif_->loop_count);
+            static int s_rewind_logs = 0;
+            if (((++s_rewind_logs) & 0x1F) == 1) {
+                ESP_LOGI(TAG, "GIF rewound for infinite loop (manual), loop_count=%d", (int)gif_->loop_count);
+            }
             return;
         } else {
             playing_ = false;

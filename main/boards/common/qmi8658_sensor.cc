@@ -138,6 +138,10 @@ bool Qmi8658Sensor::TryReadGyro(Vec3f* out) {
     uint8_t buf[6];
     esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buf, 6, 200 /*ms*/);
     if (err != ESP_OK) {
+        static int s_fail;
+        if (((++s_fail) & 0x0F) == 1) { // rate-limit logs
+            ESP_LOGW(TAG_QMI, "TryReadGyro I2C error: %s", esp_err_to_name(err));
+        }
         return false;
     }
     int16_t x = (int16_t)((buf[1] << 8) | buf[0]);
