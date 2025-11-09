@@ -93,34 +93,6 @@ std::vector<OfflineImageManager::ImageInfo> OfflineImageManager::GetStoredImages
     return images;
 }
 
-bool OfflineImageManager::ShowStoredImage(const std::string& filename) {
-    ESP_LOGI(TAG, "Showing stored image: %s", filename.c_str());
-    
-    if (!gif_storage_exists(filename.c_str())) {
-        ShowStatus("图片文件不存在: " + filename);
-        return false;
-    }
-    
-    uint8_t* data = nullptr;
-    size_t size = 0;
-    esp_err_t ret = gif_storage_read(filename.c_str(), &data, &size);
-    
-    if (ret != ESP_OK) {
-        ShowStatus("读取图片失败: " + filename);
-        return false;
-    }
-    
-    // 显示图片
-    auto& app = Application::GetInstance();
-    app.Schedule([&app, data, size, filename]() {
-        app.ShowGif(data, size, 0, 0);
-        heap_caps_free(data);  // 释放内存
-    });
-    
-    ShowStatus("正在显示: " + filename);
-    return true;
-}
-
 bool OfflineImageManager::DeleteStoredImage(const std::string& filename) {
     ESP_LOGI(TAG, "Deleting stored image: %s", filename.c_str());
     
@@ -195,9 +167,10 @@ void OfflineImageManager::HandleButtonPress() {
             if (!current_images_.empty()) {
                 button_state_ = ButtonState::BROWSING_IMAGES;
                 current_image_index_ = 0;
-                ShowStoredImage(current_images_[current_image_index_].filename);
-                ShowStatus("图片浏览模式 (" + std::to_string(current_image_index_ + 1) + 
-                          "/" + std::to_string(current_images_.size()) + ")");
+                // 启动slideshow，用户可以通过手势切换
+                auto& app = Application::GetInstance();
+                app.SlideShow();
+                ShowStatus("图片播放模式 - 滑动切换图片 (" + std::to_string(current_images_.size()) + " 张)");
             } else {
                 ShowStatus("没有存储的图片文件");
                 button_state_ = ButtonState::IDLE;
@@ -205,11 +178,12 @@ void OfflineImageManager::HandleButtonPress() {
             break;
             
         case ButtonState::BROWSING_IMAGES:
-            // 显示下一张图片
+            // 切换到下一张图片（通过slideshow手势控制）
             if (!current_images_.empty()) {
+                auto& app = Application::GetInstance();
+                app.SlideShowNext();  // 使用slideshow的下一张功能
                 current_image_index_ = (current_image_index_ + 1) % current_images_.size();
-                ShowStoredImage(current_images_[current_image_index_].filename);
-                ShowStatus("图片浏览 (" + std::to_string(current_image_index_ + 1) + 
+                ShowStatus("下一张图片 (" + std::to_string(current_image_index_ + 1) +
                           "/" + std::to_string(current_images_.size()) + ")");
             } else {
                 ShowStatus("没有图片文件");
@@ -265,7 +239,6 @@ void OfflineImageManager::HandleButtonLongPress() {
                         if (current_image_index_ >= current_images_.size()) {
                             current_image_index_ = 0;
                         }
-                        ShowStoredImage(current_images_[current_image_index_].filename);
                     }
                 }
             } else {

@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "lcd_display.h"
 #include "system_info.h"
 #include "ml307_ssl_transport.h"
 #include "audio_codec.h"
@@ -10,6 +11,7 @@
 #include "iot/thing_manager.h"
 #include "assets/lang_config.h"
 #include "YT_UART.h"
+#include "storage/gif_storage.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -34,6 +36,12 @@ extern "C"{
 }
 
 #define TAG "Application"
+
+// Helper function to collect file names
+static std::vector<std::string> storage_files;
+static void collect_file_callback(const char* filename, size_t size, void* user_data) {
+    storage_files.push_back(std::string(filename));
+}
 
 static const char *const STATE_STRINGS[] = {
     "unknown",
@@ -285,10 +293,12 @@ void Application::SendEmotionByString(const char *emotion)
 void Application::Alert(const char *status, const char *message, const char *emotion, const std::string_view &sound)
 {
     ESP_LOGW(TAG, "Alert %s: %s [%s]", status, message, emotion);
+#if CONFIG_USE_WAKE_WORD_DETECT
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
     display->SetEmotion(emotion);
     display->SetChatMessage("system", message);
+#endif
     // SendEmotionByString(emotion);
     if (!sound.empty())
     {
@@ -300,10 +310,12 @@ void Application::DismissAlert()
 {
     if (device_state_ == kDeviceStateIdle)
     {
+#if CONFIG_USE_WAKE_WORD_DETECT
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
         display->SetEmotion("neutral");
         display->SetChatMessage("system", "");
+#endif
         // SendEmotionByString("sleepy");
     }
 }
@@ -509,6 +521,7 @@ void Application::Start()
     //     app->applicant_task();
     //     vTaskDelete(NULL); }, "applicant_task", 4096 * 2, this, 4, nullptr);
 
+#if CONFIG_USE_WAKE_WORD_DETECT
     /* Wait for the network to be ready */
     board.StartNetwork();
 
@@ -519,6 +532,13 @@ void Application::Start()
 #else
     protocol_ = std::make_unique<MqttProtocol>();
 #endif
+#else
+    // 离线模式：跳过网络和协议初始化
+    ESP_LOGI(TAG, "Offline mode: skipping network and protocol initialization");
+    display->SetStatus("离线模式");
+#endif
+
+#if CONFIG_USE_WAKE_WORD_DETECT
     protocol_->OnNetworkError([this](const std::string &message)
                               {
         SetDeviceState(kDeviceStateIdle);
@@ -660,7 +680,6 @@ void Application::Start()
         } });
 #endif
 
-#if CONFIG_USE_WAKE_WORD_DETECT
     wake_word_detect_.Initialize(codec->input_channels(), codec->input_reference());
     wake_word_detect_.OnWakeWordDetected([this](const std::string &wake_word)
                                          { Schedule([this, &wake_word]()
@@ -698,7 +717,8 @@ void Application::Start()
     // 初始化离线图片管理器
     InitializeOfflineImageManager();
 
-    // 启动完成后默认开启幻灯片，确保有 GIF 显示
+#if CONFIG_USE_WAKE_WORD_DETECT
+    // 在线模式：启动完成后默认开启幻灯片，确保有 GIF 显示
     background_task_->Schedule([this]() {
         vTaskDelay(pdMS_TO_TICKS(3000));  // 等待系统稳定
         if (device_state_ == kDeviceStateIdle && !IsSlideShowRunning()) {
@@ -706,6 +726,10 @@ void Application::Start()
             SlideShow();
         }
     });
+#else
+    // 离线模式：不自动启动幻灯片，等待用户按键操作
+    ESP_LOGI(TAG, "Offline mode: SlideShow will be controlled by user buttons");
+#endif
     // }
 }
 
@@ -721,6 +745,8 @@ void Application::OnClockTimer()
         int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
         ESP_LOGI(TAG, "Free internal: %u minimal internal: %u", free_sram, min_free_sram);
 
+#if CONFIG_USE_WAKE_WORD_DETECT
+        // 只在在线模式下显示时钟
         // If we have synchronized server time, set the status to clock "HH:MM" if the device is idle
         if (ota_.HasServerTime())
         {
@@ -735,6 +761,7 @@ void Application::OnClockTimer()
                     Board::GetInstance().GetDisplay()->SetStatus(time_str); });
             }
         }
+#endif
     }
 
     // GIF测试：每45秒切换一次显示/隐藏状态（避开时钟更新时间）
@@ -912,7 +939,7 @@ void Application::InputAudio()
         wake_word_detect_.Feed(data);
     }
 #endif
-#if CONFIG_USE_AUDIO_PROCESSOR
+#if CONFIG_USE_WAKE_WORD_DETECT && CONFIG_USE_AUDIO_PROCESSOR
     if (audio_processor_.IsRunning())
     {
         audio_processor_.Input(data);
@@ -969,11 +996,17 @@ void Application::SetDeviceState(DeviceState state)
         // gpio_set_level(GPIO_NUM_11, 0);
         // PlaySound(Lang::Sounds::P3_SUCCESS);
         // vTaskDelay(pdMS_TO_TICKS(400));
+#if CONFIG_USE_WAKE_WORD_DETECT
+        // 只在在线模式下设置状态栏和表情，离线模式下避免覆盖中央消息
         display->SetStatus(Lang::Strings::STANDBY);
         display->SetEmotion("neutral");
+#else
+        // 离线模式：不设置任何显示内容，保持屏幕清洁
+        ESP_LOGI(TAG, "Offline mode: skipping status and emotion display");
+#endif
 
         // SendEmotionByString("NEUTRAL");
-#if CONFIG_USE_AUDIO_PROCESSOR
+#if CONFIG_USE_WAKE_WORD_DETECT && CONFIG_USE_AUDIO_PROCESSOR
         audio_processor_.Stop();
 #endif
 #if CONFIG_USE_WAKE_WORD_DETECT
@@ -983,8 +1016,10 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateConnecting:
         // gpio_set_level(GPIO_NUM_11, 0);
         // PlaySound(Lang::Sounds::P3_SUCCESS);
+#if CONFIG_USE_WAKE_WORD_DETECT
         display->SetStatus(Lang::Strings::CONNECTING);
         display->SetEmotion("neutral");
+#endif
         display->SetChatMessage("system", "");
 
         // codec->EnableOutput(true);
@@ -996,8 +1031,10 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateListening:
         // SendEmotionByString("happy");
         gpio_set_level(GPIO_NUM_11, 1);
+#if CONFIG_USE_WAKE_WORD_DETECT
         display->SetStatus(Lang::Strings::LISTENING);
         display->SetEmotion("neutral");
+#endif
         ResetDecoder();
         opus_encoder_->ResetState();
         // UpdateIotStates();
@@ -1010,7 +1047,7 @@ void Application::SetDeviceState(DeviceState state)
 
         // // 关闭音频输出（但保持功放开启，以便后续语音输入）
         // codec->EnableOutput(false);
-#if CONFIG_USE_AUDIO_PROCESSOR
+#if CONFIG_USE_WAKE_WORD_DETECT && CONFIG_USE_AUDIO_PROCESSOR
         audio_processor_.Start();
 #endif
 #if CONFIG_USE_WAKE_WORD_DETECT
@@ -1028,10 +1065,13 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateSpeaking:
         // vTaskDelay(pdMS_TO_TICKS(50));
         gpio_set_level(GPIO_NUM_11, 0);
+#if CONFIG_USE_WAKE_WORD_DETECT
         display->SetStatus(Lang::Strings::SPEAKING);
+        display->SetEmotion("neutral");
+#endif
         ResetDecoder();
         codec->EnableOutput(true);
-#if CONFIG_USE_AUDIO_PROCESSOR
+#if CONFIG_USE_WAKE_WORD_DETECT && CONFIG_USE_AUDIO_PROCESSOR
         audio_processor_.Stop();
 #endif
 #if CONFIG_USE_WAKE_WORD_DETECT
@@ -1259,6 +1299,37 @@ bool Application::IsGifPlaying() const
     return display ? display->IsGifPlaying() : false;
 }
 
+// Load a GIF from storage into PSRAM buffer (no display). Caller must free *out_buf with heap_caps_free.
+static bool LoadGifFromStorage(const char* filename, uint8_t** out_buf, size_t* out_len) {
+    if (!filename || !out_buf || !out_len) return false;
+    *out_buf = nullptr;
+    *out_len = 0;
+
+    ESP_LOGI(TAG, "Loading GIF from storage: %s", filename);
+
+    // Use gif_storage_read which allocates in PSRAM (same as DownloadGifToPsram)
+    uint8_t* buf = nullptr;
+    size_t len = 0;
+    esp_err_t ret = gif_storage_read(filename, &buf, &len);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to load GIF from storage: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    // Validate GIF header (same validation as DownloadGifToPsram)
+    if (len < 6 || (memcmp(buf, "GIF87a", 6) != 0 && memcmp(buf, "GIF89a", 6) != 0)) {
+        ESP_LOGE(TAG, "Invalid GIF file: %s", filename);
+        heap_caps_free(buf);
+        return false;
+    }
+
+    *out_buf = buf;
+    *out_len = len;
+    ESP_LOGI(TAG, "Loaded GIF from storage: %s (%zu bytes)", filename, len);
+    return true;
+}
+
 // Download a GIF into PSRAM buffer (no display). Caller must free *out_buf with heap_caps_free.
 static bool DownloadGifToPsram(const char* url, uint8_t** out_buf, size_t* out_len) {
     if (!url || !out_buf || !out_len) return false;
@@ -1441,6 +1512,16 @@ extern "C" void app_stop_slideshow(void) {
 
 void Application::SlideShowFromUrl()
 {
+    SlideShowGeneric(true);
+}
+
+void Application::SlideShowFromStorage()
+{
+    SlideShowGeneric(false);
+}
+
+void Application::SlideShowGeneric(bool from_url)
+{
     // Prevent concurrent slideshows
     if (slideshow_running_) {
         ESP_LOGW(TAG, "SlideShow already running, ignore request");
@@ -1449,62 +1530,99 @@ void Application::SlideShowFromUrl()
     stop_slideshow_ = false;
     slideshow_running_ = true;
 
-    background_task_->Schedule([this]() {
-        // List of GIF URLs to preload, then display sequentially
-        static const char* kGifUrls[] = {
-            //"http://122.51.57.185:18080/test1.gif",
-            //"http://122.51.57.185:18080/test2.gif",
-            //"http://122.51.57.185:18080/test3.gif",
-            //"http://122.51.57.185:18080/huahua-1.gif",
-            //"http://122.51.57.185:18080/412_Normal.gif",
-            //"http://122.51.57.185:18080/412_think.gif",
-            //"http://122.51.57.185:18080/412_angry.gif",
-            //"http://122.51.57.185:18080/wink1.gif",
-            //"http://122.51.57.185:18080/wink2.gif",
-            "http://122.51.57.185:18080/jime.gif",
-            "http://122.51.57.185:18080/jime_cry.gif",
-            //"http://122.51.57.185:18080/g1.gif",
-            //"http://122.51.57.185:18080/g2.gif",
-            //"http://122.51.57.185:18080/g3.gif",
-            //"http://122.51.57.185:18080/g4.gif"
-            //"http://122.51.57.185:18080/412_cheer.gif",
-            //"http://122.51.57.185:18080/412_sadly.gif"
-        };
-        constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
+    background_task_->Schedule([this, from_url]() {
+        std::vector<std::string> gif_sources;
 
-        ESP_LOGI(TAG, "SlideShow started (preload + loop) (%d items)", kCount);
+        if (from_url) {
+            // List of GIF URLs to preload, then display sequentially
+            static const char* kGifUrls[] = {
+                //"http://122.51.57.185:18080/test1.gif",
+                //"http://122.51.57.185:18080/test2.gif",
+                //"http://122.51.57.185:18080/test3.gif",
+                //"http://122.51.57.185:18080/huahua-1.gif",
+                //"http://122.51.57.185:18080/412_Normal.gif",
+                //"http://122.51.57.185:18080/412_think.gif",
+                //"http://122.51.57.185:18080/412_angry.gif",
+                //"http://122.51.57.185:18080/wink1.gif",
+                //"http://122.51.57.185:18080/wink2.gif",
+                "http://122.51.57.185:18080/jime.gif",
+                "http://122.51.57.185:18080/jime_cry.gif",
+                //"http://122.51.57.185:18080/g1.gif",
+                //"http://122.51.57.185:18080/g2.gif",
+                //"http://122.51.57.185:18080/g3.gif",
+                //"http://122.51.57.185:18080/g4.gif"
+                //"http://122.51.57.185:18080/412_cheer.gif",
+                //"http://122.51.57.185:18080/412_sadly.gif"
+            };
+            constexpr int kCount = sizeof(kGifUrls) / sizeof(kGifUrls[0]);
+            for (int i = 0; i < kCount; ++i) {
+                gif_sources.push_back(kGifUrls[i]);
+            }
+        } else {
+            // Collect all GIF files from storage
+            auto callback = [](const char* filename, size_t size, void* user_data) {
+                auto* files = static_cast<std::vector<std::string>*>(user_data);
+                // Only add .gif files
+                if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
+                    files->push_back(filename);
+                    ESP_LOGI("SlideShow", "Found GIF: %s (%zu bytes)", filename, size);
+                }
+            };
 
-        // Ensure no decoding during download phase
+            esp_err_t ret = gif_storage_list(callback, &gif_sources);
+            if (ret != ESP_OK || gif_sources.empty()) {
+                ESP_LOGE(TAG, "No GIF files found in storage or storage error: %s", esp_err_to_name(ret));
+                if (auto display = Board::GetInstance().GetDisplay()) display->HideGif();
+                stop_slideshow_ = false;
+                slideshow_running_ = false;
+                ESP_LOGI(TAG, "SlideShow finished (no files)");
+                return;
+            }
+        }
+
+        const int kCount = gif_sources.size();
+
+        ESP_LOGI(TAG, "SlideShow started (preload + loop) (%d items) from %s", kCount, from_url ? "URL" : "storage");
+
+        // Ensure no decoding during preload phase
         if (auto display = Board::GetInstance().GetDisplay()) {
             display->HideGif();
         }
 
-        struct PreGif { uint8_t* data; size_t size; const char* url; };
-        PreGif items[kCount];
+        struct PreGif { uint8_t* data; size_t size; std::string source; };
+        std::vector<PreGif> items(kCount);
         for (int i = 0; i < kCount; ++i) {
             items[i].data = nullptr;
             items[i].size = 0;
-            items[i].url = kGifUrls[i];
+            items[i].source = gif_sources[i];
         }
 
         int loaded = 0;
-        // Download all GIFs first (no decoding)
+        // Load all GIFs first (no decoding)
         for (int i = 0; i < kCount && !stop_slideshow_; ++i) {
             if (device_state_ != kDeviceStateIdle) {
                 ESP_LOGW(TAG, "Device not idle, abort SlideShow preload");
                 stop_slideshow_ = true;
                 break;
             }
-            ESP_LOGI(TAG, "Pre-download %d/%d: %s", i + 1, kCount, kGifUrls[i]);
+            ESP_LOGI(TAG, "Pre-load %d/%d: %s", i + 1, kCount, gif_sources[i].c_str());
             uint8_t* buf = nullptr; size_t len = 0;
-            if (DownloadGifToPsram(kGifUrls[i], &buf, &len)) {
+            bool success = false;
+
+            if (from_url) {
+                success = DownloadGifToPsram(gif_sources[i].c_str(), &buf, &len);
+            } else {
+                success = LoadGifFromStorage(gif_sources[i].c_str(), &buf, &len);
+            }
+
+            if (success) {
                 items[loaded].data = buf;
                 items[loaded].size = len;
-                items[loaded].url  = kGifUrls[i];
+                items[loaded].source = gif_sources[i];
                 ++loaded;
             } else {
                 if (buf) heap_caps_free(buf);
-                ESP_LOGE(TAG, "Pre-download failed: %s", kGifUrls[i]);
+                ESP_LOGE(TAG, "Pre-load failed: %s", gif_sources[i].c_str());
             }
             vTaskDelay(1);
         }
@@ -1512,16 +1630,16 @@ void Application::SlideShowFromUrl()
         if (loaded == 0 || stop_slideshow_) {
             ESP_LOGW(TAG, "No GIFs preloaded or slideshow stopped during preload");
             if (auto display = Board::GetInstance().GetDisplay()) display->HideGif();
-            for (int i = 0; i < kCount; ++i) if (items[i].data) heap_caps_free(items[i].data);
+            for (int i = 0; i < loaded; ++i) if (items[i].data) heap_caps_free(items[i].data);
             stop_slideshow_ = false;
             slideshow_running_ = false;
             ESP_LOGI(TAG, "SlideShow finished");
             return;
         }
 
-        ESP_LOGI(TAG, "Pre-download completed: %d/%d", loaded, kCount);
+        ESP_LOGI(TAG, "Pre-load completed: %d/%d", loaded, kCount);
 
-        // Display phase (no downloading)
+        // Display phase (no loading)
         int index = 0;
         while (!stop_slideshow_) {
             if (device_state_ != kDeviceStateIdle) {
@@ -1533,7 +1651,7 @@ void Application::SlideShowFromUrl()
             if (index < 0) index = (loaded - 1);
             if (index >= loaded) index = 0;
 
-            ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", index + 1, loaded, items[index].url);
+            ESP_LOGI(TAG, "SlideShow showing %d/%d: %s", index + 1, loaded, items[index].source.c_str());
             if (auto display = Board::GetInstance().GetDisplay()) {
                 display->ShowGif(items[index].data, items[index].size, 0, 0);
             }
@@ -1575,106 +1693,15 @@ void Application::SlideShowFromUrl()
 
 void Application::SlideShow()
 {
-    // Default slideshow now uses Flash storage
-    //SlideShowFromStorage();
+#if CONFIG_USE_WAKE_WORD_DETECT
+    // 在线模式：从URL加载GIF
     SlideShowFromUrl();
+#else
+    // 离线模式：从本地存储加载GIF
+    SlideShowFromStorage();
+#endif
 }
 
-void Application::SlideShowFromStorage()
-{
-    // Prevent concurrent slideshows
-    if (slideshow_running_) {
-        ESP_LOGW(TAG, "SlideShow already running, ignore request");
-        return;
-    }
-    stop_slideshow_ = false;
-    slideshow_running_ = true;
-
-    background_task_->Schedule([this]() {
-        ESP_LOGI(TAG, "SlideShowFromStorage started");
-
-        // Ensure no decoding during preparation phase
-        if (auto display = Board::GetInstance().GetDisplay()) {
-            display->HideGif();
-        }
-
-        // Collect all GIF files from storage
-        std::vector<std::string> gif_files;
-
-        auto callback = [](const char* filename, size_t size, void* user_data) {
-            auto* files = static_cast<std::vector<std::string>*>(user_data);
-            // Only add .gif files
-            if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
-                files->push_back(filename);
-                ESP_LOGI("SlideShow", "Found GIF: %s (%zu bytes)", filename, size);
-            }
-        };
-
-        esp_err_t ret = gif_storage_list(callback, &gif_files);
-        if (ret != ESP_OK || gif_files.empty()) {
-            ESP_LOGE(TAG, "No GIF files found in storage or storage error: %s", esp_err_to_name(ret));
-            if (auto display = Board::GetInstance().GetDisplay()) display->HideGif();
-            stop_slideshow_ = false;
-            slideshow_running_ = false;
-            ESP_LOGI(TAG, "SlideShowFromStorage finished (no files)");
-            return;
-        }
-
-        ESP_LOGI(TAG, "Found %d GIF files in storage", gif_files.size());
-
-        // Display phase - load and show GIFs one by one
-        int index = 0;
-        while (!stop_slideshow_) {
-            if (device_state_ != kDeviceStateIdle) {
-                ESP_LOGW(TAG, "Device state changed, abort SlideShowFromStorage");
-                stop_slideshow_ = true;
-                break;
-            }
-
-            // Normalize index
-            if (index < 0) index = (gif_files.size() - 1);
-            if (index >= static_cast<int>(gif_files.size())) index = 0;
-
-            const std::string& filename = gif_files[index];
-            ESP_LOGI(TAG, "SlideShowFromStorage showing %d/%d: %s", index + 1, gif_files.size(), filename.c_str());
-
-            // Load and display GIF from storage
-            if (auto display = Board::GetInstance().GetDisplay()) {
-                display->ShowGifFromFlash(filename.c_str(), 0, 0);
-            }
-
-            // Wait for user swipe to change item; do not auto-advance when GIF finishes
-            while (!stop_slideshow_) {
-                if (device_state_ != kDeviceStateIdle) {
-                    ESP_LOGW(TAG, "Device state changed, abort SlideShowFromStorage");
-                    stop_slideshow_ = true;
-                    break;
-                }
-                int skip = slideshow_skip_.exchange(0);
-                if (skip != 0) {
-                    index += skip; // -1 prev, +1 next (from gesture)
-                    // Add delay to allow previous GIF cleanup to complete
-                    // This prevents concurrent decoder tasks from corrupting heap
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                    goto next_item;
-                }
-                // Keep current GIF looping until user swipes to change item
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
-            // no automatic index change here; wait strictly for gestures
-        next_item:
-            continue;
-        }
-
-        // Clean up display
-        if (auto display = Board::GetInstance().GetDisplay())
-            display->HideGif();
-
-        stop_slideshow_ = false;
-        slideshow_running_ = false;
-        ESP_LOGI(TAG, "SlideShowFromStorage finished");
-    });
-}
 
 void Application::StopSlideShow()
 {
@@ -1695,23 +1722,57 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
     server.SetImageReceivedCallback([this](const uint8_t* data, size_t size, const std::string& filename) {
         ESP_LOGI(TAG, "Received image: %s, size: %zu bytes", filename.c_str(), size);
 
-        // 1. 保存到Flash存储
+        // 1. 检查存储空间
+        size_t total_bytes = 0, used_bytes = 0;
+        gif_storage_info(&total_bytes, &used_bytes);
+        size_t free_bytes = total_bytes - used_bytes;
+        ESP_LOGI(TAG, "Storage info: %zu total, %zu used, %zu free", total_bytes, used_bytes, free_bytes);
+
+        // 如果空间不足，清理旧文件
+        if (free_bytes < size + 100000) { // 保留100KB缓冲
+            ESP_LOGW(TAG, "Storage space low (%zu bytes free, need %zu), clearing old files", free_bytes, size);
+
+            // 获取所有文件并删除最旧的
+            storage_files.clear();
+            gif_storage_list(collect_file_callback, nullptr);
+
+            for (const auto& old_file : storage_files) {
+                ESP_LOGI(TAG, "Deleting old file: %s", old_file.c_str());
+                gif_storage_delete(old_file.c_str());
+
+                // 重新检查空间
+                gif_storage_info(&total_bytes, &used_bytes);
+                free_bytes = total_bytes - used_bytes;
+                if (free_bytes >= size + 100000) {
+                    ESP_LOGI(TAG, "Sufficient space available after cleanup: %zu bytes", free_bytes);
+                    break;
+                }
+            }
+        }
+
+        // 2. 保存到Flash存储
         esp_err_t ret = gif_storage_write(filename.c_str(), data, size);
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "Image saved to storage: %s", filename.c_str());
 
-            // 显示保存成功的通知
+            // 显示保存成功的通知（使用中央显示）
             Schedule([this, filename]() {
                 auto display = Board::GetInstance().GetDisplay();
                 if (display) {
                     std::string message = "图片已保存: " + filename;
-                    display->ShowNotification(message.c_str(), 3000);
+                    // 尝试调用ShowCenterMessage（如果是LcdDisplay的话）
+                    auto lcd_display = static_cast<LcdDisplay*>(display);
+                    if (lcd_display) {
+                        lcd_display->ShowCenterMessage(message.c_str(), 3000);
+                    }
                 }
+
+
             });
         } else {
             ESP_LOGE(TAG, "Failed to save image to storage: %s", filename.c_str());
 
-            // 显示保存失败的通知
+            // 显示保存失败的通知（使用中央显示）
             Schedule([this, filename]() {
                 auto display = Board::GetInstance().GetDisplay();
                 if (display) {
@@ -1721,10 +1782,23 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
             });
         }
 
-        // 2. 如果是GIF文件，直接显示
+        // 2. 如果是GIF文件，启动slideshow循环播放
         if (filename.find(".gif") != std::string::npos || filename.find(".GIF") != std::string::npos) {
-            Schedule([this, data, size]() {
-                ShowGif(data, size, 0, 0);
+            Schedule([this, filename]() {
+                // 延迟一下让通知显示完成，然后启动slideshow
+                ESP_LOGI(TAG, "Starting slideshow after GIF upload: %s", filename.c_str());
+                vTaskDelay(pdMS_TO_TICKS(3500));
+
+                // 检查slideshow状态
+                ESP_LOGI(TAG, "Slideshow running status: %s", slideshow_running_.load() ? "true" : "false");
+                ESP_LOGI(TAG, "Device state: %d", (int)device_state_);
+
+                // 强制刷新文件系统并检查文件是否存在
+                size_t total_bytes = 0, used_bytes = 0;
+                gif_storage_info(&total_bytes, &used_bytes);
+                ESP_LOGI(TAG, "Storage after upload: %zu total, %zu used", total_bytes, used_bytes);
+
+                SlideShow();  // 使用统一接口，自动路由到正确实现
             });
         }
 
@@ -1738,14 +1812,8 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
         ESP_LOGI(TAG, "SSID: %s", server.GetSsid().c_str());
         ESP_LOGI(TAG, "Upload URL: %s", server.GetUploadUrl().c_str());
 
-        // 在显示屏上显示连接信息
-        auto display = Board::GetInstance().GetDisplay();
-        if (display) {
-            std::string message = "图片上传服务已启动\n";
-            message += "WiFi: " + server.GetSsid() + "\n";
-            message += "上传地址: " + server.GetUploadUrl();
-            display->ShowNotification(message.c_str(), 30000); // 显示30秒
-        }
+        // 注意：不在这里显示消息，让OfflineImageManager通过回调显示
+        // 这样可以确保消息显示在屏幕中央而不是状态栏
     } else {
         ESP_LOGE(TAG, "Failed to start image upload server");
     }
@@ -1758,10 +1826,8 @@ void Application::StopImageUploadServer() {
     server.Stop();
     ESP_LOGI(TAG, "Image upload server stopped");
 
-    auto display = Board::GetInstance().GetDisplay();
-    if (display) {
-        display->ShowNotification("图片上传服务已停止", 3000);
-    }
+    // 注意：不在这里显示消息，让OfflineImageManager通过回调显示
+    // 这样可以确保消息显示在屏幕中央
 }
 
 bool Application::IsImageUploadServerRunning() const {
@@ -1785,12 +1851,12 @@ void Application::InitializeOfflineImageManager() {
 
     auto& manager = OfflineImageManager::GetInstance();
 
-    // 设置状态回调，用于在屏幕上显示消息
+    // 设置状态回调，用于在屏幕中央显示消息
     manager.SetStatusCallback([this](const std::string& message) {
         Schedule([this, message]() {
             auto display = Board::GetInstance().GetDisplay();
             if (display) {
-                display->ShowNotification(message.c_str(), 3000);
+                display->ShowNotification(message.c_str(), 5000);
             }
         });
     });

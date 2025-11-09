@@ -75,13 +75,13 @@ public:
 private:
     // GIF decoder instance
     gd_GIF* gif_;
-    
+
     // LVGL image descriptor
     lv_img_dsc_t img_dsc_;
-    
-    // Animation timer
+
+    // Animation timer (runs in LVGL thread)
     lv_timer_t* timer_;
-    
+
     // Last frame update time
     uint32_t last_call_;
 
@@ -91,29 +91,29 @@ private:
     // Animation state
     std::atomic<bool> playing_;
     bool loaded_;
+    // If true, implement infinite looping by forcing single-pass + manual rewind
+    bool force_infinite_ = false;
 
     // Frame update callback
     std::function<void()> frame_callback_;
 
-    // Background decoder task
+    // (Legacy) Background decoder members kept for compatibility but unused now
     TaskHandle_t decode_task_ = nullptr;
-    // Optional static task resources (prefer PSRAM if allowed)
     StaticTask_t* decode_tcb_ = nullptr;
     StackType_t* decode_stack_ = nullptr; // in words
     uint32_t decode_stack_words_ = 0;
-
     // Async callback executed in LVGL thread to notify frame updated
     static void AsyncFrameCb(void* user_data);
 
-    // Task trampoline and loop
-    static void DecoderTaskTrampoline(void* arg);
-    void DecoderLoop();
+    // LVGL timer callback and one-shot tick handler (decode on LVGL thread)
+    static void TimerCb(lv_timer_t* t);
+    void TickOnce();
 
     /**
      * Update to next frame (kept for compatibility if needed)
      */
     void NextFrame();
-    
+
     /**
      * Cleanup resources
      */

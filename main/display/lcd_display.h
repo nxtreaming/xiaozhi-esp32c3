@@ -21,6 +21,8 @@ protected:
     lv_obj_t* content_ = nullptr;
     lv_obj_t* container_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
+    lv_obj_t* center_message_popup_ = nullptr;
+    lv_obj_t* center_message_label_ = nullptr;
 
     // //加 蓝牙模式
     // lv_obj_t* bluetooth_icon_  = nullptr;
@@ -29,6 +31,7 @@ protected:
     // lv_obj_t* status_label_   = nullptr;
 
     DisplayFonts fonts_;
+    esp_timer_handle_t center_message_timer_ = nullptr;
 
     // GIF controller (official-style): decode + frame timer
     std::unique_ptr<LvglGif> gif_controller_;
@@ -57,6 +60,8 @@ public:
     ~LcdDisplay();
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetIcon(const char* icon) override;
+    virtual void ShowCenterMessage(const char* message, int duration_ms = 5000);
+    virtual void ShowCenterMessage(const std::string &message, int duration_ms = 5000);
 
     // void SetupBluetoothUI();
     // void UpdateBluetoothStatus(bool is_connected, char* device_name);

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 
 static const char* TAG = "GifStorage";
 static bool s_initialized = false;
@@ -32,13 +33,26 @@ esp_err_t gif_storage_init(void) {
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount or format filesystem");
+            ESP_LOGW(TAG, "Failed to mount filesystem, formatting...");
+            // Format the partition and try again
+            ret = esp_spiffs_format(STORAGE_PARTITION_LABEL);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to format SPIFFS partition: %s", esp_err_to_name(ret));
+                return ret;
+            }
+            ESP_LOGI(TAG, "SPIFFS partition formatted successfully, retrying mount");
+            ret = esp_vfs_spiffs_register(&conf);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to mount after format: %s", esp_err_to_name(ret));
+                return ret;
+            }
         } else if (ret == ESP_ERR_NOT_FOUND) {
             ESP_LOGE(TAG, "Failed to find SPIFFS partition '%s'", STORAGE_PARTITION_LABEL);
+            return ret;
         } else {
             ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+            return ret;
         }
-        return ret;
     }
 
     size_t total = 0, used = 0;
@@ -163,15 +177,44 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
 
     ESP_LOGI(TAG, "Writing file: %s (%zu bytes)", filepath, size);
 
+    // Check available space before writing
+    size_t total, used;
+    esp_err_t space_ret = esp_spiffs_info(STORAGE_PARTITION_LABEL, &total, &used);
+    if (space_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Before write - Total: %zu, Used: %zu, Free: %zu", total, used, total - used);
+    }
+
     // Open file for writing
     FILE* f = fopen(filepath, "wb");
     if (!f) {
-        ESP_LOGE(TAG, "Failed to create file: %s", filepath);
+        ESP_LOGE(TAG, "Failed to create file: %s (errno: %d)", filepath, errno);
         return ESP_FAIL;
     }
 
-    // Write data
-    size_t written = fwrite(data, 1, size, f);
+    ESP_LOGI(TAG, "File opened successfully, attempting to write %zu bytes", size);
+
+    // Write data in chunks to debug
+    size_t written = 0;
+    const size_t chunk_size = 16384;  // Write in 16KB chunks
+    const uint8_t* ptr = data;
+
+    while (written < size) {
+        size_t to_write = (size - written > chunk_size) ? chunk_size : (size - written);
+        size_t chunk_written = fwrite(ptr, 1, to_write, f);
+
+        if (chunk_written == 0) {
+            ESP_LOGE(TAG, "fwrite returned 0 at offset %zu, ferror=%d, feof=%d", written, ferror(f), feof(f));
+            break;
+        }
+
+        written += chunk_written;
+        ptr += chunk_written;
+
+        if (written % (128 * 1024) == 0) {  // Log every 128KB
+            ESP_LOGI(TAG, "Written %zu / %zu bytes", written, size);
+        }
+    }
+
     fclose(f);
 
     if (written != size) {

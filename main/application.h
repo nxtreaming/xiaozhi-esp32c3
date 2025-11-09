@@ -93,9 +93,10 @@ public:
     bool IsSlideShowRunning() const;
 
     // GIF slideshow
-    void SlideShow();                // Default: from Flash storage
+    void SlideShow();                // Default: routes to URL or storage based on mode
     void SlideShowFromUrl();         // From network URLs
-    void SlideShowFromStorage();     // From Flash storage (same as SlideShow)
+    void SlideShowFromStorage();     // From Flash storage
+    void SlideShowGeneric(bool from_url); // Generic slideshow engine
     void StopSlideShow();
     // Control slideshow manually (e.g., touch gestures)
     void SlideShowNext();

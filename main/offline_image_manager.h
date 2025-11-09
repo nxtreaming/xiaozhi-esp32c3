@@ -61,12 +61,6 @@ public:
      */
     std::vector<ImageInfo> GetStoredImages();
 
-    /**
-     * @brief 显示指定的图片
-     * @param filename 图片文件名
-     * @return 是否成功
-     */
-    bool ShowStoredImage(const std::string& filename);
 
     /**
      * @brief 删除指定的图片

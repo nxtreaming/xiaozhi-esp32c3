@@ -19,6 +19,8 @@ public:
     virtual void SetStatus(const char* status);
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+    virtual void ShowCenterMessage(const char* message, int duration_ms = 5000);
+    virtual void ShowCenterMessage(const std::string &message, int duration_ms = 5000);
     virtual void SetPreviewImage(const lv_img_dsc_t* image);
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
@@ -30,6 +32,8 @@ protected:
     lv_obj_t *network_label_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
     lv_obj_t *notification_label_ = nullptr;
+    lv_obj_t *center_message_popup_ = nullptr;
+    lv_obj_t *center_message_label_ = nullptr;
     lv_obj_t *mute_label_ = nullptr;
     lv_obj_t *battery_label_ = nullptr;
     lv_obj_t* low_battery_popup_ = nullptr;
@@ -41,6 +45,7 @@ protected:
 
     std::chrono::system_clock::time_point last_status_update_time_;
     esp_timer_handle_t notification_timer_ = nullptr;
+    esp_timer_handle_t center_message_timer_ = nullptr;
 
     friend class DisplayLockGuard;
     virtual bool Lock(int timeout_ms = 0) = 0;

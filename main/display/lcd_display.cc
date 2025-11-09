@@ -358,6 +358,12 @@ LcdDisplay::~LcdDisplay() {
     if (container_ != nullptr) {
         lv_obj_del(container_);
     }
+    if (center_message_popup_ != nullptr) {
+        lv_obj_del(center_message_popup_);
+    }
+    if (center_message_timer_ != nullptr) {
+        esp_timer_delete(center_message_timer_);
+    }
     if (display_ != nullptr) {
         lv_display_delete(display_);
     }
@@ -1699,4 +1705,69 @@ void LcdDisplay::ShowGifFromFlash(const char* filename, int x, int y) {
 
     // Note: gif_data ownership is transferred to ShowGifWithManagedBuffer
     // Do not free it here
+}
+
+void LcdDisplay::ShowCenterMessage(const std::string &message, int duration_ms) {
+    ShowCenterMessage(message.c_str(), duration_ms);
+}
+
+void LcdDisplay::ShowCenterMessage(const char* message, int duration_ms) {
+    DisplayLockGuard guard(this);
+    if (!guard.locked()) {
+        return;
+    }
+
+    // 创建中央消息定时器（如果不存在）
+    if (center_message_timer_ == nullptr) {
+        esp_timer_create_args_t center_message_timer_args = {
+            .callback = [](void *arg) {
+                LcdDisplay *display = static_cast<LcdDisplay*>(arg);
+                DisplayLockGuard lock(display);
+                if (display->center_message_popup_ != nullptr) {
+                    lv_obj_add_flag(display->center_message_popup_, LV_OBJ_FLAG_HIDDEN);
+                }
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "center_message_timer",
+            .skip_unhandled_events = false,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&center_message_timer_args, &center_message_timer_));
+    }
+
+    // 创建中央消息弹窗（如果不存在）
+    if (center_message_popup_ == nullptr) {
+        lv_obj_t *screen = lv_scr_act();
+
+        // 创建半透明背景
+        center_message_popup_ = lv_obj_create(screen);
+        lv_obj_set_size(center_message_popup_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_pos(center_message_popup_, 0, 0);
+        lv_obj_set_style_bg_color(center_message_popup_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(center_message_popup_, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(center_message_popup_, 0, 0);
+        lv_obj_set_style_pad_all(center_message_popup_, 20, 0);
+
+        // 创建消息标签
+        center_message_label_ = lv_label_create(center_message_popup_);
+        lv_obj_set_width(center_message_label_, LV_HOR_RES - 40);
+        lv_obj_center(center_message_label_);
+        lv_obj_set_style_text_color(center_message_label_, lv_color_white(), 0);
+        lv_obj_set_style_text_align(center_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(center_message_label_, LV_LABEL_LONG_WRAP);
+
+        // 初始状态为隐藏
+        lv_obj_add_flag(center_message_popup_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 设置消息文本
+    lv_label_set_text(center_message_label_, message);
+
+    // 显示弹窗，确保在最前面
+    lv_obj_clear_flag(center_message_popup_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(center_message_popup_);
+
+    // 启动定时器自动隐藏
+    esp_timer_stop(center_message_timer_);
+    ESP_ERROR_CHECK(esp_timer_start_once(center_message_timer_, duration_ms * 1000));
 }
