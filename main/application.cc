@@ -765,7 +765,7 @@ void Application::OnClockTimer()
     }
 
     // GIF测试：每45秒切换一次显示/隐藏状态（避开时钟更新时间）
-    if (device_state_ == kDeviceStateIdle && !slideshow_running_ && clock_ticks_ > 15) // 启动15秒后开始（幻灯片运行时跳过自动切换）
+    if (device_state_ == kDeviceStateIdle && !slideshow_running_ && clock_ticks_ > 15 && !IsImageUploadServerRunning()) // 启动15秒后开始（幻灯片运行时跳过自动切换）
     {
         // 使用45秒周期，避开10秒的时钟更新周期
         if (clock_ticks_ % 45 == 0) // 每45秒
@@ -773,7 +773,7 @@ void Application::OnClockTimer()
             // 延迟2秒执行，避免与时钟更新冲突
             background_task_->Schedule([this]() {
                 vTaskDelay(pdMS_TO_TICKS(2000));  // 延迟2秒
-                if (device_state_ == kDeviceStateIdle) { // 再次检查状态
+                if (device_state_ == kDeviceStateIdle && !IsImageUploadServerRunning()) { // 再次检查状态
                     ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
                     SlideShow();
                 }
