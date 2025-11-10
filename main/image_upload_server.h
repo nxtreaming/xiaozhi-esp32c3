@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <ctime>
 #include <esp_http_server.h>
 #include <esp_event.h>
 #include <esp_timer.h>
@@ -14,7 +15,7 @@ public:
     static ImageUploadServer& GetInstance();
     
     // 回调函数类型定义
-    using ImageReceivedCallback = std::function<void(const uint8_t* data, size_t size, const std::string& filename)>;
+    using ImageReceivedCallback = std::function<void(const uint8_t* data, size_t size, const std::string& filename, time_t upload_time)>;
     
     // 设置图片接收回调
     void SetImageReceivedCallback(ImageReceivedCallback callback);
@@ -66,6 +67,7 @@ private:
     static esp_err_t IndexHandler(httpd_req_t *req);
     static esp_err_t UploadHandler(httpd_req_t *req);
     static esp_err_t StatusHandler(httpd_req_t *req);
+    static esp_err_t FilesHandler(httpd_req_t *req);
     
     // WiFi事件处理
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

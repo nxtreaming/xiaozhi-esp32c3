@@ -40,7 +40,7 @@ extern "C"{
 
 // Helper function to collect file names
 static std::vector<std::string> storage_files;
-static void collect_file_callback(const char* filename, size_t size, void* user_data) {
+static void collect_file_callback(const char* filename, size_t size, time_t upload_time, void* user_data) {
     storage_files.push_back(std::string(filename));
 }
 
@@ -732,7 +732,7 @@ void Application::Start()
         if (device_state_ == kDeviceStateIdle && !IsSlideShowRunning()) {
             // 检查本地是否有GIF文件
             std::vector<std::string> gif_files;
-            auto callback = [](const char* filename, size_t size, void* user_data) {
+            auto callback = [](const char* filename, size_t size, time_t upload_time, void* user_data) {
                 auto* files = static_cast<std::vector<std::string>*>(user_data);
                 if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
                     files->push_back(filename);
@@ -1579,7 +1579,7 @@ void Application::SlideShowGeneric(bool from_url)
             }
         } else {
             // Collect all GIF files from storage
-            auto callback = [](const char* filename, size_t size, void* user_data) {
+            auto callback = [](const char* filename, size_t size, time_t upload_time, void* user_data) {
                 auto* files = static_cast<std::vector<std::string>*>(user_data);
                 // Only add .gif files
                 if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
@@ -1738,13 +1738,14 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
     }
 
     // 设置图片接收回调
-    server.SetImageReceivedCallback([this](const uint8_t* data, size_t size, const std::string& filename) {
+    server.SetImageReceivedCallback([this](const uint8_t* data, size_t size, const std::string& filename, time_t upload_time) {
         ESP_LOGI(TAG, "Received image: %s, size: %zu bytes", filename.c_str(), size);
 
         auto image_buffer = std::make_shared<std::vector<uint8_t>>(data, data + size);
         auto filename_copy = filename;
+        auto upload_time_copy = upload_time;
 
-        background_task_->Schedule([this, image_buffer, filename_copy]() {
+        background_task_->Schedule([this, image_buffer, filename_copy, upload_time_copy]() {
             size_t total_bytes = 0, used_bytes = 0;
             gif_storage_info(&total_bytes, &used_bytes);
             size_t free_bytes = total_bytes - used_bytes;
@@ -1778,6 +1779,7 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "Image saved to storage: %s", filename_copy.c_str());
                 upload_server.NotifyStorageResult(true, "上传并保存成功");
+                gif_storage_set_upload_time(filename_copy.c_str(), upload_time_copy);
 
                 Schedule([this, filename_copy]() {
                     auto display = Board::GetInstance().GetDisplay();

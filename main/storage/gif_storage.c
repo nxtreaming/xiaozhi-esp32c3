@@ -289,7 +289,11 @@ esp_err_t gif_storage_list(gif_storage_list_callback_t callback, void* user_data
         snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, entry->d_name);
         struct stat st;
         if (stat(filepath, &st) == 0) {
-            callback(entry->d_name, st.st_size, user_data);
+            time_t upload_time = st.st_mtime;
+            if (gif_storage_get_upload_time(entry->d_name, &upload_time) != ESP_OK) {
+                upload_time = st.st_mtime;
+            }
+            callback(entry->d_name, st.st_size, upload_time, user_data);
         }
     }
 
@@ -325,10 +329,71 @@ esp_err_t gif_storage_delete(const char* filename) {
         return ESP_FAIL;
     }
 
+    gif_storage_set_upload_time(filename, 0);
+
     ESP_LOGI(TAG, "Deleted file: %s", filename);
     return ESP_OK;
 }
 
 esp_err_t gif_storage_get_info(size_t* total_bytes, size_t* used_bytes) {
     return gif_storage_info(total_bytes, used_bytes);
+}
+
+static void build_meta_path(const char* filename, char* buffer, size_t buffer_size) {
+    snprintf(buffer, buffer_size, "%s/.meta_%s", STORAGE_BASE_PATH, filename);
+}
+
+esp_err_t gif_storage_set_upload_time(const char* filename, time_t upload_time) {
+    if (!s_initialized || !filename) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char meta_path[256];
+    build_meta_path(filename, meta_path, sizeof(meta_path));
+
+    if (upload_time <= 0) {
+        unlink(meta_path);
+        return ESP_OK;
+    }
+
+    FILE* f = fopen(meta_path, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Failed to open meta file: %s", meta_path);
+        return ESP_FAIL;
+    }
+
+    if (fwrite(&upload_time, sizeof(upload_time), 1, f) != 1) {
+        ESP_LOGW(TAG, "Failed to write meta file: %s", meta_path);
+        fclose(f);
+        unlink(meta_path);
+        return ESP_FAIL;
+    }
+
+    fclose(f);
+    return ESP_OK;
+}
+
+esp_err_t gif_storage_get_upload_time(const char* filename, time_t* upload_time) {
+    if (!s_initialized || !filename || !upload_time) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char meta_path[256];
+    build_meta_path(filename, meta_path, sizeof(meta_path));
+
+    FILE* f = fopen(meta_path, "rb");
+    if (!f) {
+        return ESP_FAIL;
+    }
+
+    time_t stored_time = 0;
+    size_t read_items = fread(&stored_time, sizeof(stored_time), 1, f);
+    fclose(f);
+
+    if (read_items != 1) {
+        return ESP_FAIL;
+    }
+
+    *upload_time = stored_time;
+    return ESP_OK;
 }

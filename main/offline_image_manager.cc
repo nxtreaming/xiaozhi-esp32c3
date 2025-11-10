@@ -102,7 +102,7 @@ bool OfflineImageManager::IsBrowsingImages() const {
 std::vector<OfflineImageManager::ImageInfo> OfflineImageManager::GetStoredImages() {
     std::vector<ImageInfo> images;
     
-    gif_storage_list([](const char* filename, size_t size, void* user_data) {
+    gif_storage_list([](const char* filename, size_t size, time_t upload_time, void* user_data) {
         auto* images_ptr = static_cast<std::vector<ImageInfo>*>(user_data);
         
         ImageInfo info;

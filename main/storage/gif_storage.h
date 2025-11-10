@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,8 +71,10 @@ bool gif_storage_exists(const char* filename);
  * 
  * @return ESP_OK on success, error code otherwise
  */
-typedef void (*gif_storage_list_callback_t)(const char* filename, size_t size, void* user_data);
+typedef void (*gif_storage_list_callback_t)(const char* filename, size_t size, time_t upload_time, void* user_data);
 esp_err_t gif_storage_list(gif_storage_list_callback_t callback, void* user_data);
+esp_err_t gif_storage_set_upload_time(const char* filename, time_t upload_time);
+esp_err_t gif_storage_get_upload_time(const char* filename, time_t* upload_time);
 
 /**
  * @brief Get storage information

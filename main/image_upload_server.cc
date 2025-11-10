@@ -7,6 +7,14 @@
 #include <cstring>
 #include <memory>
 #include <sstream>
+#include <vector>
+#include <algorithm>
+#include <ctime>
+#include <iomanip>
+#include <cstdlib>
+#include <cstdio>
+
+#include "storage/gif_storage.h"
 
 #define TAG "ImageUploadServer"
 
@@ -50,6 +58,55 @@ const char* StageToString(ImageUploadServer::UploadStage stage) {
         default:
             return "idle";
     }
+}
+
+struct StoredFileInfo {
+    std::string name;
+    size_t size = 0;
+    time_t upload_time = 0;
+};
+
+void CollectStoredFiles(const char* filename, size_t size, time_t upload_time, void* user_data) {
+    auto* files = static_cast<std::vector<StoredFileInfo>*>(user_data);
+    files->push_back(StoredFileInfo{std::string(filename), size, upload_time});
+}
+
+std::string FormatRelativeDuration(time_t seconds_since_boot) {
+    if (seconds_since_boot < 0) {
+        seconds_since_boot = 0;
+    }
+    const int hours = static_cast<int>(seconds_since_boot / 3600);
+    const int minutes = static_cast<int>((seconds_since_boot % 3600) / 60);
+    const int seconds = static_cast<int>(seconds_since_boot % 60);
+
+    char buffer[48];
+    snprintf(buffer, sizeof(buffer), "设备启动后 %02d:%02d:%02d", hours, minutes, seconds);
+    return std::string(buffer);
+}
+
+std::string FormatTimestamp(time_t ts) {
+    // Treat timestamps earlier than year 2000 as "time since boot"
+    constexpr time_t kReasonableEpoch = 946684800; // 2000-01-01 00:00:00 UTC
+    if (ts <= 0) {
+        return "未知";
+    }
+
+    if (ts < kReasonableEpoch) {
+        return FormatRelativeDuration(ts);
+    }
+
+    struct tm timeinfo = {};
+#if defined(_WIN32)
+    localtime_s(&timeinfo, &ts);
+#else
+    localtime_r(&ts, &timeinfo);
+#endif
+
+    char buffer[32];
+    if (strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo) == 0) {
+        return "未知";
+    }
+    return std::string(buffer);
 }
 
 } // namespace
@@ -263,6 +320,14 @@ void ImageUploadServer::StartWebServer() {
         .user_ctx = this
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &status_uri));
+
+    httpd_uri_t files_uri = {
+        .uri = "/files",
+        .method = HTTP_GET,
+        .handler = FilesHandler,
+        .user_ctx = this
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &files_uri));
     
     ESP_LOGI(TAG, "Web server started");
 }
@@ -304,6 +369,29 @@ esp_err_t ImageUploadServer::IndexHandler(httpd_req_t *req) {
 esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     auto* self = static_cast<ImageUploadServer*>(req->user_ctx);
     self->StartUploadProgress(req->content_len);
+
+    time_t upload_time = 0;
+    char upload_ts_header[32];
+    if (httpd_req_get_hdr_value_str(req, "X-Upload-Timestamp", upload_ts_header, sizeof(upload_ts_header)) == ESP_OK) {
+        long long header_ts = strtoll(upload_ts_header, nullptr, 10);
+        if (header_ts > 0) {
+            upload_time = static_cast<time_t>(header_ts / 1000);
+        }
+    }
+    long tz_offset_minutes = 0;
+    char tz_offset_header[16];
+    if (httpd_req_get_hdr_value_str(req, "X-Upload-TzOffset", tz_offset_header, sizeof(tz_offset_header)) == ESP_OK) {
+        tz_offset_minutes = strtol(tz_offset_header, nullptr, 10);
+    }
+    if (upload_time > 0) {
+        time_t adjusted = upload_time - tz_offset_minutes * 60;
+        if (adjusted > 0) {
+            upload_time = adjusted;
+        }
+    }
+    if (upload_time == 0) {
+        upload_time = static_cast<time_t>(esp_timer_get_time() / 1000000ULL);
+    }
 
     // 检查Content-Type
     char content_type[100];
@@ -422,19 +510,18 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // 移除结尾的boundary数据
-    if (image_data.size() > boundary_str.length() + 10) {
-        // 简单处理：移除最后的一些字节（包含boundary）
-        image_data.resize(image_data.size() - boundary_str.length() - 10);
-    }
-
-    self->SetStorageTotal(image_data.size());
-
+    // 移除结尾的boundary数据
+    if (image_data.size() > boundary_str.length() + 10) {
+        // 简单处理：移除最后的一些字节（包含boundary等尾数据）
+        image_data.resize(image_data.size() - boundary_str.length() - 10);
+    }
+    self->SetStorageTotal(image_data.size());
+
     ESP_LOGI(TAG, "Received image: %s, size: %d bytes", filename.c_str(), image_data.size());
 
     // 调用回调函数处理图片数据
     if (self->image_callback_ && !image_data.empty()) {
-        self->image_callback_(image_data.data(), image_data.size(), filename);
+        self->image_callback_(image_data.data(), image_data.size(), filename, upload_time);
     }
 
     // 发送成功响应
@@ -449,6 +536,36 @@ esp_err_t ImageUploadServer::StatusHandler(httpd_req_t *req) {
     std::string json = self->BuildStatusJson();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json.c_str(), json.length());
+    return ESP_OK;
+}
+
+esp_err_t ImageUploadServer::FilesHandler(httpd_req_t *req) {
+    std::vector<StoredFileInfo> files;
+    esp_err_t ret = gif_storage_list(CollectStoredFiles, &files);
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to list files");
+        return ret;
+    }
+
+    std::sort(files.begin(), files.end(), [](const StoredFileInfo& a, const StoredFileInfo& b) {
+        return a.upload_time > b.upload_time;
+    });
+
+    std::ostringstream oss;
+    oss << "{\"files\":[";
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << "{\"name\":\"" << JsonEscape(files[i].name) << "\",";
+        oss << "\"size\":" << files[i].size << ",";
+        oss << "\"uploadTime\":\"" << JsonEscape(FormatTimestamp(files[i].upload_time)) << "\"}";
+    }
+    oss << "]}";
+
+    auto payload = oss.str();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, payload.c_str(), payload.length());
     return ESP_OK;
 }
 
@@ -485,6 +602,16 @@ std::string ImageUploadServer::GenerateUploadPage() {
         .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .preview { max-width: 200px; max-height: 200px; margin: 10px auto; display: block; border-radius: 5px; }
+        .file-list { margin-top: 30px; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .file-list-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .file-list table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .file-list th, .file-list td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 14px; }
+        .file-list th { background: #f7f7f7; color: #555; }
+        .file-list tr:hover td { background: #f9fafb; }
+        .file-empty { text-align: center; color: #777; padding: 15px 0; font-size: 14px; }
+        .table-wrapper { width: 100%; overflow-x: auto; }
+        .upload-btn.secondary { background: #6c757d; }
+        .upload-btn.secondary:hover { background: #5a6268; }
     </style>
 </head>
 <body>
@@ -501,6 +628,25 @@ std::string ImageUploadServer::GenerateUploadPage() {
         <div class="progress-text" id="progressText"></div>
         <div id="status"></div>
         <div id="preview"></div>
+        <div class="file-list">
+            <div class="file-list-header">
+                <h2>📂 已上传 GIF</h2>
+                <button class="upload-btn secondary" id="refreshFiles">刷新列表</button>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>文件名</th>
+                            <th>大小</th>
+                            <th>上传时间</th>
+                        </tr>
+                    </thead>
+                    <tbody id="fileTableBody"></tbody>
+                </table>
+            </div>
+            <div class="file-empty" id="fileEmpty">暂无 GIF 文件</div>
+        </div>
     </div>
 
     <script>
@@ -511,8 +657,13 @@ std::string ImageUploadServer::GenerateUploadPage() {
         const progressText = document.getElementById('progressText');
         const status = document.getElementById('status');
         const preview = document.getElementById('preview');
+        const fileTableBody = document.getElementById('fileTableBody');
+        const fileEmpty = document.getElementById('fileEmpty');
+        const refreshFilesBtn = document.getElementById('refreshFiles');
         let statusTimer = null;
         let hasSeenServerStage = false;
+
+        refreshFilesBtn.addEventListener('click', loadFileList);
 
         // 拖拽上传
         uploadArea.addEventListener('dragover', (e) => {
@@ -594,6 +745,9 @@ std::string ImageUploadServer::GenerateUploadPage() {
             });
 
             xhr.open('POST', '/upload');
+            const now = Date.now();
+            xhr.setRequestHeader('X-Upload-Timestamp', now.toString());
+            xhr.setRequestHeader('X-Upload-TzOffset', new Date().getTimezoneOffset().toString());
             xhr.send(formData);
         }
 
@@ -672,6 +826,7 @@ std::string ImageUploadServer::GenerateUploadPage() {
 
             if (stage === 'completed') {
                 status.innerHTML = '<div class="status success">GIF 上传并保存成功</div>';
+                loadFileList();
                 stopStatusPolling();
                 hasSeenServerStage = false;
                 setTimeout(() => {
@@ -690,6 +845,50 @@ std::string ImageUploadServer::GenerateUploadPage() {
                 status.innerHTML = '';
             }
         }
+
+        async function loadFileList() {
+            try {
+                const response = await fetch('/files', { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error('Failed to load files');
+                }
+                const data = await response.json();
+                renderFileList(data.files || []);
+            } catch (error) {
+                console.error('Failed to load file list', error);
+            }
+        }
+
+        function renderFileList(files) {
+            fileTableBody.innerHTML = '';
+            if (!files.length) {
+                fileEmpty.style.display = 'block';
+                return;
+            }
+            fileEmpty.style.display = 'none';
+            files.forEach((file) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${file.name}</td>
+                    <td>${formatBytes(file.size)}</td>
+                    <td>${file.uploadTime || '未知'}</td>
+                `;
+                fileTableBody.appendChild(row);
+            });
+        }
+
+        function formatBytes(bytes) {
+            if (bytes >= 1024 * 1024) {
+                return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+            }
+            if (bytes >= 1024) {
+                return (bytes / 1024).toFixed(2) + ' KB';
+            }
+            return bytes + ' B';
+        }
+
+        loadFileList();
+
     </script>
 </body>
 </html>)HTML";
