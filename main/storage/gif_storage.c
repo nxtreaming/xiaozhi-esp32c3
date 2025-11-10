@@ -195,7 +195,7 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
 
     // Write data in chunks to debug
     size_t written = 0;
-    const size_t chunk_size = 16384;  // Write in 16KB chunks
+    const size_t chunk_size = 8192;  // Write in 8KB chunks
     const uint8_t* ptr = data;
 
     while (written < size) {
@@ -210,7 +210,7 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
         written += chunk_written;
         ptr += chunk_written;
 
-        if (written % (128 * 1024) == 0) {  // Log every 128KB
+        if (written % (64 * 1024) == 0) {  // Log every 64KB
             ESP_LOGI(TAG, "Written %zu / %zu bytes", written, size);
         }
     }
