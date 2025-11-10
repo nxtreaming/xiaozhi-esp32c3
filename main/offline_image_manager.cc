@@ -95,6 +95,10 @@ std::string OfflineImageManager::GetImageUploadServiceInfo() const {
     return app.GetImageUploadServerInfo();
 }
 
+bool OfflineImageManager::IsBrowsingImages() const {
+    return button_state_ == ButtonState::BROWSING_IMAGES;
+}
+
 std::vector<OfflineImageManager::ImageInfo> OfflineImageManager::GetStoredImages() {
     std::vector<ImageInfo> images;
     
@@ -207,7 +211,22 @@ void OfflineImageManager::UpdateImageList() {
 
 void OfflineImageManager::HandleButtonPress() {
     ESP_LOGI(TAG, "Button press - current state: %d", (int)button_state_);
-    
+
+    // 检查实际的服务运行状态，如果状态不一致则同步
+    bool service_actually_running = IsImageUploadServiceRunning();
+    if (button_state_ == ButtonState::SERVICE_RUNNING && !service_actually_running) {
+        ESP_LOGW(TAG, "State mismatch detected, resetting to IDLE");
+        button_state_ = ButtonState::IDLE;
+    }
+
+    // 如果幻灯片正在运行，先停止它
+    auto& app = Application::GetInstance();
+    if (app.IsSlideShowRunning()) {
+        ESP_LOGI(TAG, "Stopping running slideshow");
+        app.StopSlideShow();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
     switch (button_state_) {
         case ButtonState::IDLE:
             // 启动图片上传服务

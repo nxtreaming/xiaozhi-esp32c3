@@ -52,6 +52,11 @@ public:
     bool IsImageUploadServiceRunning() const;
 
     /**
+     * @brief 检查是否处于图片浏览模式
+     */
+    bool IsBrowsingImages() const;
+
+    /**
      * @brief 获取图片上传服务信息
      */
     std::string GetImageUploadServiceInfo() const;

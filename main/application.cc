@@ -773,7 +773,8 @@ void Application::OnClockTimer()
             // 延迟2秒执行，避免与时钟更新冲突
             background_task_->Schedule([this]() {
                 vTaskDelay(pdMS_TO_TICKS(2000));  // 延迟2秒
-                if (device_state_ == kDeviceStateIdle && !IsImageUploadServerRunning()) { // 再次检查状态
+                auto& offline_mgr = OfflineImageManager::GetInstance();
+                if (device_state_ == kDeviceStateIdle && !IsImageUploadServerRunning() && !offline_mgr.IsBrowsingImages()) { // 再次检查状态
                     ESP_LOGI(TAG, "Auto showing URL GIF (delayed)");
                     SlideShow();
                 }
@@ -1782,23 +1783,19 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
             });
         }
 
-        // 2. 如果是GIF文件，启动slideshow循环播放
+        // 2. 如果是GIF文件，停止上传服务并启动slideshow循环播放
         if (filename.find(".gif") != std::string::npos || filename.find(".GIF") != std::string::npos) {
             Schedule([this, filename]() {
-                // 延迟一下让通知显示完成，然后启动slideshow
+                // 延迟一下让通知显示完成
                 ESP_LOGI(TAG, "Starting slideshow after GIF upload: %s", filename.c_str());
-                vTaskDelay(pdMS_TO_TICKS(3500));
+                vTaskDelay(pdMS_TO_TICKS(2000));
 
-                // 检查slideshow状态
-                ESP_LOGI(TAG, "Slideshow running status: %s", slideshow_running_.load() ? "true" : "false");
-                ESP_LOGI(TAG, "Device state: %d", (int)device_state_);
+                // 停止上传服务
+                StopImageUploadServer();
+                vTaskDelay(pdMS_TO_TICKS(500));
 
-                // 强制刷新文件系统并检查文件是否存在
-                size_t total_bytes = 0, used_bytes = 0;
-                gif_storage_info(&total_bytes, &used_bytes);
-                ESP_LOGI(TAG, "Storage after upload: %zu total, %zu used", total_bytes, used_bytes);
-
-                SlideShow();  // 使用统一接口，自动路由到正确实现
+                // 启动幻灯片
+                SlideShow();
             });
         }
 
