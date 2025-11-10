@@ -6,8 +6,53 @@
 #include <lwip/ip_addr.h>
 #include <cstring>
 #include <memory>
+#include <sstream>
 
 #define TAG "ImageUploadServer"
+
+namespace {
+
+std::string JsonEscape(const std::string& input) {
+    std::string output;
+    output.reserve(input.size());
+    for (char c : input) {
+        switch (c) {
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buffer[7];
+                    snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(c));
+                    output += buffer;
+                } else {
+                    output += c;
+                }
+                break;
+        }
+    }
+    return output;
+}
+
+const char* StageToString(ImageUploadServer::UploadStage stage) {
+    switch (stage) {
+        case ImageUploadServer::UploadStage::kUploading:
+            return "uploading";
+        case ImageUploadServer::UploadStage::kSaving:
+            return "saving";
+        case ImageUploadServer::UploadStage::kCompleted:
+            return "completed";
+        case ImageUploadServer::UploadStage::kError:
+            return "error";
+        case ImageUploadServer::UploadStage::kIdle:
+        default:
+            return "idle";
+    }
+}
+
+} // namespace
 
 ImageUploadServer& ImageUploadServer::GetInstance() {
     static ImageUploadServer instance;
@@ -16,6 +61,7 @@ ImageUploadServer& ImageUploadServer::GetInstance() {
 
 ImageUploadServer::ImageUploadServer() {
     ssid_prefix_ = "ImageUpload";
+    ResetProgress();
 }
 
 ImageUploadServer::~ImageUploadServer() {
@@ -24,6 +70,87 @@ ImageUploadServer::~ImageUploadServer() {
 
 void ImageUploadServer::SetImageReceivedCallback(ImageReceivedCallback callback) {
     image_callback_ = callback;
+}
+
+void ImageUploadServer::ResetProgress() {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_ = UploadStatus{};
+    progress_.message = "ready";
+}
+
+void ImageUploadServer::StartUploadProgress(size_t total_bytes) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.stage = UploadStage::kUploading;
+    progress_.upload_total = total_bytes;
+    progress_.upload_received = 0;
+    progress_.storage_total = 0;
+    progress_.storage_written = 0;
+    progress_.success = false;
+    progress_.message = "正在上传到设备...";
+    progress_.filename.clear();
+}
+
+void ImageUploadServer::UpdateUploadProgress(size_t received_bytes) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.upload_received = received_bytes;
+}
+
+void ImageUploadServer::SetCurrentFilename(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.filename = filename;
+}
+
+void ImageUploadServer::SetProgressError(const std::string& message) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.stage = UploadStage::kError;
+    progress_.message = message;
+    progress_.success = false;
+}
+
+void ImageUploadServer::SetStorageTotal(size_t total_bytes) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.storage_total = total_bytes;
+}
+
+void ImageUploadServer::NotifyStorageStart(size_t total_bytes) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.stage = UploadStage::kSaving;
+    progress_.storage_written = 0;
+    progress_.storage_total = total_bytes;
+    progress_.message = "正在保存到存储...";
+}
+
+void ImageUploadServer::NotifyStorageProgress(size_t written, size_t total) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    if (total > 0) {
+        progress_.storage_total = total;
+    }
+    progress_.storage_written = written;
+}
+
+void ImageUploadServer::NotifyStorageResult(bool success, const std::string& message) {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_.stage = success ? UploadStage::kCompleted : UploadStage::kError;
+    progress_.success = success;
+    if (success) {
+        progress_.upload_received = progress_.upload_total;
+        progress_.storage_written = progress_.storage_total;
+    }
+    progress_.message = message;
+}
+
+std::string ImageUploadServer::BuildStatusJson() const {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    std::ostringstream oss;
+    oss << "{\"stage\":\"" << StageToString(progress_.stage) << "\",";
+    oss << "\"filename\":\"" << JsonEscape(progress_.filename) << "\",";
+    oss << "\"upload\":{\"received\":" << progress_.upload_received
+        << ",\"total\":" << progress_.upload_total << "},";
+    oss << "\"storage\":{\"written\":" << progress_.storage_written
+        << ",\"total\":" << progress_.storage_total << "},";
+    oss << "\"success\":" << (progress_.success ? "true" : "false") << ",";
+    oss << "\"message\":\"" << JsonEscape(progress_.message) << "\"}";
+    return oss.str();
 }
 
 bool ImageUploadServer::Start(const std::string& ssid_prefix) {
@@ -51,6 +178,7 @@ bool ImageUploadServer::Start(const std::string& ssid_prefix) {
 void ImageUploadServer::Stop() {
     StopWebServer();
     StopAccessPoint();
+    ResetProgress();
     ESP_LOGI(TAG, "Image upload server stopped");
 }
 
@@ -175,11 +303,13 @@ esp_err_t ImageUploadServer::IndexHandler(httpd_req_t *req) {
 
 esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     auto* self = static_cast<ImageUploadServer*>(req->user_ctx);
+    self->StartUploadProgress(req->content_len);
 
     // 检查Content-Type
     char content_type[100];
     if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK) {
         ESP_LOGE(TAG, "No Content-Type header found");
+        self->SetProgressError("缺少Content-Type");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing Content-Type");
         return ESP_FAIL;
     }
@@ -187,6 +317,7 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     // 检查是否是multipart/form-data
     if (strstr(content_type, "multipart/form-data") == nullptr) {
         ESP_LOGE(TAG, "Invalid Content-Type: %s", content_type);
+        self->SetProgressError("Content-Type错误");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Content-Type");
         return ESP_FAIL;
     }
@@ -195,6 +326,7 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     char* boundary = strstr(content_type, "boundary=");
     if (!boundary) {
         ESP_LOGE(TAG, "No boundary found in Content-Type");
+        self->SetProgressError("缺少boundary");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No boundary found");
         return ESP_FAIL;
     }
@@ -206,6 +338,7 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     const size_t max_file_size = 5 * 1024 * 1024;
     if (req->content_len > max_file_size) {
         ESP_LOGE(TAG, "File too large: %d bytes", req->content_len);
+        self->SetProgressError("文件太大，超过5MB限制");
         httpd_resp_set_status(req, "413 Payload Too Large");
         httpd_resp_send(req, "File too large", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
@@ -216,6 +349,7 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
     auto buffer = std::make_unique<char[]>(buffer_size);
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate buffer");
+        self->SetProgressError("内存不足，无法接收文件");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
         return ESP_FAIL;
     }
@@ -234,15 +368,18 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
         if (received <= 0) {
             if (received == HTTPD_SOCK_ERR_TIMEOUT) {
                 ESP_LOGE(TAG, "Socket timeout");
+                self->SetProgressError("上传超时");
                 httpd_resp_send_408(req);
             } else {
                 ESP_LOGE(TAG, "Failed to receive data");
+                self->SetProgressError("接收数据失败");
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive data");
             }
             return ESP_FAIL;
         }
 
         total_received += received;
+        self->UpdateUploadProgress(total_received);
 
         // 简化的multipart解析 - 查找文件数据
         std::string chunk(buffer.get(), received);
@@ -256,6 +393,7 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
                 if (filename_end != std::string::npos) {
                     filename = chunk.substr(filename_pos, filename_end - filename_pos);
                     ESP_LOGI(TAG, "Found filename: %s", filename.c_str());
+                    self->SetCurrentFilename(filename);
                 }
             }
 
@@ -277,11 +415,20 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
         }
     }
 
+    if (image_data.empty()) {
+        ESP_LOGE(TAG, "No file data received");
+        self->SetProgressError("未收到有效的文件数据");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No file data received");
+        return ESP_FAIL;
+    }
+
     // 移除结尾的boundary数据
     if (image_data.size() > boundary_str.length() + 10) {
         // 简单处理：移除最后的一些字节（包含boundary）
         image_data.resize(image_data.size() - boundary_str.length() - 10);
     }
+
+    self->SetStorageTotal(image_data.size());
 
     ESP_LOGI(TAG, "Received image: %s, size: %d bytes", filename.c_str(), image_data.size());
 
@@ -298,8 +445,10 @@ esp_err_t ImageUploadServer::UploadHandler(httpd_req_t *req) {
 }
 
 esp_err_t ImageUploadServer::StatusHandler(httpd_req_t *req) {
+    auto* self = static_cast<ImageUploadServer*>(req->user_ctx);
+    std::string json = self->BuildStatusJson();
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"status\":\"ready\"}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, json.c_str(), json.length());
     return ESP_OK;
 }
 
@@ -331,6 +480,7 @@ std::string ImageUploadServer::GenerateUploadPage() {
         .upload-btn:hover { background: #0056b3; }
         .progress { width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px; margin: 10px 0; overflow: hidden; }
         .progress-bar { height: 100%; background: #28a745; width: 0%; transition: width 0.3s; }
+        .progress-text { text-align: center; font-size: 14px; color: #555; margin-bottom: 10px; display: none; }
         .status { margin: 10px 0; padding: 10px; border-radius: 5px; }
         .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
@@ -348,6 +498,7 @@ std::string ImageUploadServer::GenerateUploadPage() {
         <div class="progress" id="progress" style="display:none;">
             <div class="progress-bar" id="progressBar"></div>
         </div>
+        <div class="progress-text" id="progressText"></div>
         <div id="status"></div>
         <div id="preview"></div>
     </div>
@@ -357,8 +508,11 @@ std::string ImageUploadServer::GenerateUploadPage() {
         const fileInput = document.getElementById('fileInput');
         const progress = document.getElementById('progress');
         const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
         const status = document.getElementById('status');
         const preview = document.getElementById('preview');
+        let statusTimer = null;
+        let hasSeenServerStage = false;
 
         // 拖拽上传
         uploadArea.addEventListener('dragover', (e) => {
@@ -400,35 +554,141 @@ std::string ImageUploadServer::GenerateUploadPage() {
             };
             reader.readAsDataURL(file);
 
-            // 显示进度条
+            // 显示进度条并开始轮询状态
             progress.style.display = 'block';
             progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            progressText.style.display = 'block';
+            progressText.textContent = '准备上传...';
+            status.innerHTML = '';
+            hasSeenServerStage = false;
+            stopStatusPolling();
+            startStatusPolling();
 
             const xhr = new XMLHttpRequest();
+            const fileSize = file.size || 0;
             
             xhr.upload.addEventListener('progress', (e) => {
-                if (e.lengthComputable) {
-                    const percentComplete = (e.loaded / e.total) * 100;
+                const loaded = e.loaded || 0;
+                const total = (e.lengthComputable && e.total) ? e.total : fileSize;
+                if (total > 0) {
+                    const percentComplete = Math.min(50, (loaded / total) * 50);
                     progressBar.style.width = percentComplete + '%';
+                    progressBar.textContent = percentComplete.toFixed(0) + '%';
+                    progressText.textContent = '正在上传到设备...';
                 }
             });
 
             xhr.addEventListener('load', () => {
-                progress.style.display = 'none';
-                if (xhr.status === 200) {
-                    status.innerHTML = '<div class="status success">✅ 图片上传成功！</div>';
-                } else {
-                    status.innerHTML = '<div class="status error">❌ 上传失败，请重试</div>';
+                if (xhr.status !== 200) {
+                    status.innerHTML = '<div class="status error">上传失败，请重试</div>';
+                    stopStatusPolling();
                 }
             });
 
             xhr.addEventListener('error', () => {
+                stopStatusPolling();
                 progress.style.display = 'none';
-                status.innerHTML = '<div class="status error">❌ 网络错误，请检查连接</div>';
+                progressText.style.display = 'none';
+                status.innerHTML = '<div class="status error">网络错误，请检查连接</div>';
             });
 
             xhr.open('POST', '/upload');
             xhr.send(formData);
+        }
+
+        function startStatusPolling() {
+            fetchStatus();
+            statusTimer = setInterval(fetchStatus, 600);
+        }
+
+        function stopStatusPolling() {
+            if (statusTimer) {
+                clearInterval(statusTimer);
+                statusTimer = null;
+            }
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/status', { cache: 'no-store' });
+                if (!response.ok) {
+                    return;
+                }
+                const data = await response.json();
+                updateProgressFromStatus(data);
+            } catch (error) {
+                console.error('Failed to fetch status', error);
+            }
+        }
+
+        function updateProgressFromStatus(data) {
+            if (!data) {
+                return;
+            }
+
+            const stage = data.stage || 'idle';
+            if (stage === 'idle') {
+                return;
+            }
+
+            if (stage === 'uploading' || stage === 'saving') {
+                hasSeenServerStage = true;
+            } else if (!hasSeenServerStage) {
+                return;
+            }
+
+            const upload = data.upload || {};
+            const storage = data.storage || {};
+            const uploadPortion = upload.total ? Math.min(1, (upload.received || 0) / upload.total) : 0;
+            const storagePortion = storage.total ? Math.min(1, (storage.written || 0) / storage.total) : 0;
+            let percentComplete = 0;
+
+            if (stage === 'uploading') {
+                percentComplete = uploadPortion * 50;
+            } else if (stage === 'saving') {
+                percentComplete = 50 + storagePortion * 50;
+            } else {
+                percentComplete = 100;
+            }
+
+            progress.style.display = 'block';
+            progressText.style.display = 'block';
+            progressBar.style.width = percentComplete + '%';
+            progressBar.textContent = percentComplete.toFixed(0) + '%';
+
+            const defaultMessages = {
+                uploading: '正在上传到设备...',
+                saving: '正在保存到存储...',
+                completed: '上传并保存成功',
+                error: '上传失败，请重试'
+            };
+
+            if (data.message) {
+                progressText.textContent = data.message;
+            } else if (defaultMessages[stage]) {
+                progressText.textContent = defaultMessages[stage];
+            }
+
+            if (stage === 'completed') {
+                status.innerHTML = '<div class="status success">GIF 上传并保存成功</div>';
+                stopStatusPolling();
+                hasSeenServerStage = false;
+                setTimeout(() => {
+                    progress.style.display = 'none';
+                    progressText.style.display = 'none';
+                }, 800);
+            } else if (stage === 'error') {
+                status.innerHTML = '<div class="status error">' + (data.message || '上传失败，请重试') + '</div>';
+                stopStatusPolling();
+                hasSeenServerStage = false;
+                setTimeout(() => {
+                    progress.style.display = 'none';
+                    progressText.style.display = 'none';
+                }, 800);
+            } else {
+                status.innerHTML = '';
+            }
         }
     </script>
 </body>

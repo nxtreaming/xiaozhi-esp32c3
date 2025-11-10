@@ -49,6 +49,8 @@ esp_err_t gif_storage_read(const char* filename, uint8_t** out_data, size_t* out
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t size);
+typedef void (*gif_storage_progress_callback_t)(size_t written, size_t total, void* user_data);
+void gif_storage_set_progress_callback(gif_storage_progress_callback_t callback, void* user_data);
 esp_err_t gif_storage_delete(const char* filename);
 esp_err_t gif_storage_get_info(size_t* total_bytes, size_t* used_bytes);
 

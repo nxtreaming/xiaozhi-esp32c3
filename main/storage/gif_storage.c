@@ -11,6 +11,8 @@
 
 static const char* TAG = "GifStorage";
 static bool s_initialized = false;
+static gif_storage_progress_callback_t s_progress_callback = NULL;
+static void* s_progress_user_data = NULL;
 
 #define STORAGE_BASE_PATH "/storage"
 #define STORAGE_PARTITION_LABEL "storage"
@@ -160,6 +162,11 @@ esp_err_t gif_storage_read(const char* filename, uint8_t** out_data, size_t* out
     return ESP_OK;
 }
 
+void gif_storage_set_progress_callback(gif_storage_progress_callback_t callback, void* user_data) {
+    s_progress_callback = callback;
+    s_progress_user_data = user_data;
+}
+
 esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t size) {
     if (!s_initialized) {
         ESP_LOGE(TAG, "GIF storage not initialized");
@@ -192,6 +199,9 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
     }
 
     ESP_LOGI(TAG, "File opened successfully, attempting to write %zu bytes", size);
+    if (s_progress_callback) {
+        s_progress_callback(0, size, s_progress_user_data);
+    }
 
     // Write data in chunks to debug
     size_t written = 0;
@@ -210,6 +220,10 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
         written += chunk_written;
         ptr += chunk_written;
 
+        if (s_progress_callback) {
+            s_progress_callback(written, size, s_progress_user_data);
+        }
+
         if (written % (64 * 1024) == 0) {  // Log every 64KB
             ESP_LOGI(TAG, "Written %zu / %zu bytes", written, size);
         }
@@ -221,10 +235,16 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
         ESP_LOGE(TAG, "Failed to write complete file: %s (wrote %zu of %zu bytes)", filepath, written, size);
         // Try to remove incomplete file
         unlink(filepath);
+        if (s_progress_callback) {
+            s_progress_callback(written, size, s_progress_user_data);
+        }
         return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "Successfully wrote file: %s (%zu bytes)", filename, size);
+    if (s_progress_callback) {
+        s_progress_callback(size, size, s_progress_user_data);
+    }
     return ESP_OK;
 }
 

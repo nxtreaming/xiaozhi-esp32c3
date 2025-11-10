@@ -14,6 +14,7 @@
 #include "storage/gif_storage.h"
 
 #include <cstring>
+#include <memory>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -41,6 +42,14 @@ extern "C"{
 static std::vector<std::string> storage_files;
 static void collect_file_callback(const char* filename, size_t size, void* user_data) {
     storage_files.push_back(std::string(filename));
+}
+
+static void GifStorageProgressBridge(size_t written, size_t total, void* user_data) {
+    if (!user_data) {
+        return;
+    }
+    auto* server = static_cast<ImageUploadServer*>(user_data);
+    server->NotifyStorageProgress(written, total);
 }
 
 static const char *const STATE_STRINGS[] = {
@@ -1732,69 +1741,68 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
     server.SetImageReceivedCallback([this](const uint8_t* data, size_t size, const std::string& filename) {
         ESP_LOGI(TAG, "Received image: %s, size: %zu bytes", filename.c_str(), size);
 
-        // 1. 检查存储空间
-        size_t total_bytes = 0, used_bytes = 0;
-        gif_storage_info(&total_bytes, &used_bytes);
-        size_t free_bytes = total_bytes - used_bytes;
-        ESP_LOGI(TAG, "Storage info: %zu total, %zu used, %zu free", total_bytes, used_bytes, free_bytes);
+        auto image_buffer = std::make_shared<std::vector<uint8_t>>(data, data + size);
+        auto filename_copy = filename;
 
-        // 如果空间不足，清理旧文件
-        if (free_bytes < size + 100000) { // 保留100KB缓冲
-            ESP_LOGW(TAG, "Storage space low (%zu bytes free, need %zu), clearing old files", free_bytes, size);
+        background_task_->Schedule([this, image_buffer, filename_copy]() {
+            size_t total_bytes = 0, used_bytes = 0;
+            gif_storage_info(&total_bytes, &used_bytes);
+            size_t free_bytes = total_bytes - used_bytes;
+            ESP_LOGI(TAG, "Storage info: %zu total, %zu used, %zu free", total_bytes, used_bytes, free_bytes);
 
-            // 获取所有文件并删除最旧的
-            storage_files.clear();
-            gif_storage_list(collect_file_callback, nullptr);
+            if (free_bytes < image_buffer->size() + 100000) {
+                ESP_LOGW(TAG, "Storage space low (%zu bytes free, need %zu), clearing old files", free_bytes, image_buffer->size());
+                storage_files.clear();
+                gif_storage_list(collect_file_callback, nullptr);
 
-            for (const auto& old_file : storage_files) {
-                ESP_LOGI(TAG, "Deleting old file: %s", old_file.c_str());
-                gif_storage_delete(old_file.c_str());
+                for (const auto& old_file : storage_files) {
+                    ESP_LOGI(TAG, "Deleting old file: %s", old_file.c_str());
+                    gif_storage_delete(old_file.c_str());
 
-                // 重新检查空间
-                gif_storage_info(&total_bytes, &used_bytes);
-                free_bytes = total_bytes - used_bytes;
-                if (free_bytes >= size + 100000) {
-                    ESP_LOGI(TAG, "Sufficient space available after cleanup: %zu bytes", free_bytes);
-                    break;
-                }
-            }
-        }
-
-        // 2. 保存到Flash存储
-        esp_err_t ret = gif_storage_write(filename.c_str(), data, size);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Image saved to storage: %s", filename.c_str());
-
-            // 显示保存成功的通知（使用中央显示）
-            Schedule([this, filename]() {
-                auto display = Board::GetInstance().GetDisplay();
-                if (display) {
-                    std::string message = "图片已保存: " + filename;
-                    // 尝试调用ShowCenterMessage（如果是LcdDisplay的话）
-                    auto lcd_display = static_cast<LcdDisplay*>(display);
-                    if (lcd_display) {
-                        lcd_display->ShowCenterMessage(message.c_str(), 3000);
+                    gif_storage_info(&total_bytes, &used_bytes);
+                    free_bytes = total_bytes - used_bytes;
+                    if (free_bytes >= image_buffer->size() + 100000) {
+                        ESP_LOGI(TAG, "Sufficient space available after cleanup: %zu bytes", free_bytes);
+                        break;
                     }
                 }
+            }
 
+            auto& upload_server = ImageUploadServer::GetInstance();
+            upload_server.NotifyStorageStart(image_buffer->size());
+            gif_storage_set_progress_callback(GifStorageProgressBridge, &upload_server);
 
-            });
-        } else {
-            ESP_LOGE(TAG, "Failed to save image to storage: %s", filename.c_str());
+            esp_err_t ret = gif_storage_write(filename_copy.c_str(), image_buffer->data(), image_buffer->size());
+            gif_storage_set_progress_callback(nullptr, nullptr);
 
-            // 显示保存失败的通知（使用中央显示）
-            Schedule([this, filename]() {
-                auto display = Board::GetInstance().GetDisplay();
-                if (display) {
-                    std::string message = "保存失败: " + filename;
-                    display->ShowNotification(message.c_str(), 3000);
-                }
-            });
-        }
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Image saved to storage: %s", filename_copy.c_str());
+                upload_server.NotifyStorageResult(true, "上传并保存成功");
 
-        // 2. 上传完成后保持服务运行，允许继续上传
-        // 用户需要手动按Boot键来停止服务并进入轮播模式
-        ESP_LOGI(TAG, "GIF uploaded successfully: %s, upload service remains active", filename.c_str());
+                Schedule([this, filename_copy]() {
+                    auto display = Board::GetInstance().GetDisplay();
+                    if (display) {
+                        std::string message = std::string("图片已保存: ") + filename_copy;
+                        auto lcd_display = static_cast<LcdDisplay*>(display);
+                        if (lcd_display) {
+                            lcd_display->ShowCenterMessage(message.c_str(), 3000);
+                        }
+                    }
+                });
+            } else {
+                ESP_LOGE(TAG, "Failed to save image to storage: %s", filename_copy.c_str());
+                upload_server.NotifyStorageResult(false, "保存失败");
+
+                Schedule([this, filename_copy]() {
+                    auto display = Board::GetInstance().GetDisplay();
+                    if (display) {
+                        std::string message = std::string("保存失败: ") + filename_copy;
+                        display->ShowNotification(message.c_str(), 3000);
+                    }
+                });
+            }
+            ESP_LOGI(TAG, "GIF uploaded successfully: %s, upload service remains active", filename_copy.c_str());
+        });
     });
 
     bool success = server.Start(ssid_prefix);
