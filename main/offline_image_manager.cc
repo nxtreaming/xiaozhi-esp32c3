@@ -234,15 +234,14 @@ void OfflineImageManager::HandleButtonPress() {
             break;
             
         case ButtonState::SERVICE_RUNNING:
-            // 切换到浏览图片模式
+            // 停止上传服务并启动幻灯片播放
             StopImageUploadService();
             UpdateImageList();
             if (!current_images_.empty()) {
-                button_state_ = ButtonState::BROWSING_IMAGES;
-                current_image_index_ = 0;
-                ShowStoredImageHelper(current_images_[current_image_index_].filename);
-                ShowStatus("图片浏览模式 (" + std::to_string(current_image_index_ + 1) +
-                          "/" + std::to_string(current_images_.size()) + ")");
+                auto& app = Application::GetInstance();
+                app.SlideShow();
+                ShowStatus("幻灯片播放中 (" + std::to_string(current_images_.size()) + " 个文件)");
+                button_state_ = ButtonState::IDLE;
             } else {
                 ShowStatus("没有存储的图片文件");
                 button_state_ = ButtonState::IDLE;

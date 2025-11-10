@@ -717,19 +717,28 @@ void Application::Start()
     // 初始化离线图片管理器
     InitializeOfflineImageManager();
 
-#if CONFIG_USE_WAKE_WORD_DETECT
-    // 在线模式：启动完成后默认开启幻灯片，确保有 GIF 显示
+    // 启动完成后检查本地是否有GIF，如果有则立即播放
     background_task_->Schedule([this]() {
         vTaskDelay(pdMS_TO_TICKS(3000));  // 等待系统稳定
         if (device_state_ == kDeviceStateIdle && !IsSlideShowRunning()) {
-            ESP_LOGI(TAG, "System startup complete, starting SlideShow");
-            SlideShow();
+            // 检查本地是否有GIF文件
+            std::vector<std::string> gif_files;
+            auto callback = [](const char* filename, size_t size, void* user_data) {
+                auto* files = static_cast<std::vector<std::string>*>(user_data);
+                if (strstr(filename, ".gif") != nullptr || strstr(filename, ".GIF") != nullptr) {
+                    files->push_back(filename);
+                }
+            };
+
+            esp_err_t ret = gif_storage_list(callback, &gif_files);
+            if (ret == ESP_OK && !gif_files.empty()) {
+                ESP_LOGI(TAG, "Found %d local GIF files, starting SlideShow immediately", gif_files.size());
+                SlideShow();
+            } else {
+                ESP_LOGI(TAG, "No local GIF files found");
+            }
         }
     });
-#else
-    // 离线模式：不自动启动幻灯片，等待用户按键操作
-    ESP_LOGI(TAG, "Offline mode: SlideShow will be controlled by user buttons");
-#endif
     // }
 }
 
@@ -1783,24 +1792,9 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
             });
         }
 
-        // 2. 如果是GIF文件，停止上传服务并启动slideshow循环播放
-        if (filename.find(".gif") != std::string::npos || filename.find(".GIF") != std::string::npos) {
-            Schedule([this, filename]() {
-                // 延迟一下让通知显示完成
-                ESP_LOGI(TAG, "Starting slideshow after GIF upload: %s", filename.c_str());
-                vTaskDelay(pdMS_TO_TICKS(2000));
-
-                // 停止上传服务
-                StopImageUploadServer();
-                vTaskDelay(pdMS_TO_TICKS(500));
-
-                // 启动幻灯片
-                SlideShow();
-            });
-        }
-
-        // 3. 其他图片类型的处理（可扩展）
-        // 例如：静态图片可以转换后显示，或者发送给AI分析
+        // 2. 上传完成后保持服务运行，允许继续上传
+        // 用户需要手动按Boot键来停止服务并进入轮播模式
+        ESP_LOGI(TAG, "GIF uploaded successfully: %s, upload service remains active", filename.c_str());
     });
 
     bool success = server.Start(ssid_prefix);
