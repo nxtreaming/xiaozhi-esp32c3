@@ -328,6 +328,14 @@ void ImageUploadServer::StartWebServer() {
         .user_ctx = this
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &files_uri));
+
+    httpd_uri_t delete_uri = {
+        .uri = "/files/delete",
+        .method = HTTP_POST,
+        .handler = DeleteFileHandler,
+        .user_ctx = this
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &delete_uri));
     
     ESP_LOGI(TAG, "Web server started");
 }
@@ -569,6 +577,46 @@ esp_err_t ImageUploadServer::FilesHandler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+esp_err_t ImageUploadServer::DeleteFileHandler(httpd_req_t *req) {
+    std::string filename;
+    size_t query_len = httpd_req_get_url_query_len(req) + 1;
+    if (query_len > 1) {
+        std::string query(query_len, '\0');
+        if (httpd_req_get_url_query_str(req, query.data(), query_len) == ESP_OK) {
+            char value[128];
+            if (httpd_query_key_value(query.c_str(), "name", value, sizeof(value)) == ESP_OK) {
+                filename = value;
+            }
+        }
+    }
+
+    if (filename.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing name");
+        return ESP_FAIL;
+    }
+
+    // basic sanitization
+    if (filename.find('/') != std::string::npos || filename.find("..") != std::string::npos) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename");
+        return ESP_FAIL;
+    }
+
+    if (!gif_storage_exists(filename.c_str())) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = gif_storage_delete(filename.c_str());
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
+        return ret;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"deleted\":true}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 void ImageUploadServer::WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
@@ -608,6 +656,9 @@ std::string ImageUploadServer::GenerateUploadPage() {
         .file-list th, .file-list td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 14px; }
         .file-list th { background: #f7f7f7; color: #555; }
         .file-list tr:hover td { background: #f9fafb; }
+        .filename-cell { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        .delete-btn { background: #dc3545; color: #fff; border: none; border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+        .delete-btn:hover { background: #c82333; }
         .file-empty { text-align: center; color: #777; padding: 15px 0; font-size: 14px; }
         .table-wrapper { width: 100%; overflow-x: auto; }
         .upload-btn.secondary { background: #6c757d; }
@@ -869,11 +920,26 @@ std::string ImageUploadServer::GenerateUploadPage() {
             files.forEach((file) => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
-                    <td>${file.name}</td>
+                    <td>
+                        <div class="filename-cell">
+                            <span>${file.name}</span>
+                            <button class="delete-btn" data-name="${encodeURIComponent(file.name)}">删除</button>
+                        </div>
+                    </td>
                     <td>${formatBytes(file.size)}</td>
                     <td>${file.uploadTime || '未知'}</td>
                 `;
                 fileTableBody.appendChild(row);
+            });
+            fileTableBody.querySelectorAll('.delete-btn').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const encodedName = btn.dataset.name;
+                    const originalName = decodeURIComponent(encodedName);
+                    if (!confirm(`确定要删除 ${originalName} 吗？`)) {
+                        return;
+                    }
+                    deleteFile(encodedName, originalName);
+                });
             });
         }
 
@@ -885,6 +951,23 @@ std::string ImageUploadServer::GenerateUploadPage() {
                 return (bytes / 1024).toFixed(2) + ' KB';
             }
             return bytes + ' B';
+        }
+
+        async function deleteFile(encodedName, originalName) {
+            try {
+                const response = await fetch(`/files/delete?name=${encodedName}`, {
+                    method: 'POST'
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || '删除失败');
+                }
+                status.innerHTML = `<div class="status success">${originalName} 已删除</div>`;
+                loadFileList();
+            } catch (error) {
+                console.error('Failed to delete file', error);
+                status.innerHTML = `<div class="status error">删除失败：${error.message}</div>`;
+            }
         }
 
         loadFileList();

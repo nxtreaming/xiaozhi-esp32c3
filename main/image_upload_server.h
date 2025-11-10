@@ -68,6 +68,7 @@ private:
     static esp_err_t UploadHandler(httpd_req_t *req);
     static esp_err_t StatusHandler(httpd_req_t *req);
     static esp_err_t FilesHandler(httpd_req_t *req);
+    static esp_err_t DeleteFileHandler(httpd_req_t *req);
     
     // WiFi事件处理
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
