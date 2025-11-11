@@ -674,7 +674,7 @@ std::string ImageUploadServer::GenerateUploadPage() {
         <div class="upload-area" id="uploadArea">
             <p>点击选择图片或拖拽图片到此处</p>
             <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择图片</button>
-            <input type="file" id="fileInput" accept="image/*" multiple>
+            <input type="file" id="fileInput" accept=".gif,image/gif" multiple>
         </div>
         <div class="progress" id="progress" style="display:none;">
             <div class="progress-bar" id="progressBar"></div>
@@ -742,10 +742,16 @@ std::string ImageUploadServer::GenerateUploadPage() {
 
         function handleFiles(files) {
             for (let file of files) {
-                if (file.type.startsWith('image/')) {
+                if (isGifFile(file)) {
                     uploadFile(file);
                 }
             }
+        }
+
+        function isGifFile(file) {
+            const name = (file.name || '').toLowerCase();
+            const mime = (file.type || '').toLowerCase();
+            return name.endsWith('.gif') || mime === 'image/gif';
         }
 
         function uploadFile(file) {
