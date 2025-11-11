@@ -8,11 +8,26 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char* TAG = "GifStorage";
 static bool s_initialized = false;
 static gif_storage_progress_callback_t s_progress_callback = NULL;
 static void* s_progress_user_data = NULL;
+static SemaphoreHandle_t s_storage_mutex = NULL;
+
+static void storage_lock(void) {
+    if (s_storage_mutex) {
+        xSemaphoreTake(s_storage_mutex, portMAX_DELAY);
+    }
+}
+
+static void storage_unlock(void) {
+    if (s_storage_mutex) {
+        xSemaphoreGive(s_storage_mutex);
+    }
+}
 
 #define STORAGE_BASE_PATH "/storage"
 #define STORAGE_PARTITION_LABEL "storage"
@@ -65,6 +80,10 @@ esp_err_t gif_storage_init(void) {
         return ret;
     }
 
+    if (!s_storage_mutex) {
+        s_storage_mutex = xSemaphoreCreateMutex();
+    }
+
     ESP_LOGI(TAG, "GIF storage initialized successfully");
     ESP_LOGI(TAG, "Partition size: total: %d bytes, used: %d bytes", total, used);
     
@@ -81,6 +100,11 @@ esp_err_t gif_storage_deinit(void) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to unregister SPIFFS (%s)", esp_err_to_name(ret));
         return ret;
+    }
+
+    if (s_storage_mutex) {
+        vSemaphoreDelete(s_storage_mutex);
+        s_storage_mutex = NULL;
     }
 
     s_initialized = false;
@@ -192,9 +216,12 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
     }
 
     // Open file for writing
+    storage_lock();
+
     FILE* f = fopen(filepath, "wb");
     if (!f) {
         ESP_LOGE(TAG, "Failed to create file: %s (errno: %d)", filepath, errno);
+        storage_unlock();
         return ESP_FAIL;
     }
 
@@ -213,7 +240,7 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
         size_t chunk_written = fwrite(ptr, 1, to_write, f);
 
         if (chunk_written == 0) {
-            ESP_LOGE(TAG, "fwrite returned 0 at offset %zu, ferror=%d, feof=%d", written, ferror(f), feof(f));
+            ESP_LOGE(TAG, "fwrite returned 0 at offset %zu, ferror=%d, feof=%d, errno=%d", written, ferror(f), feof(f), errno);
             break;
         }
 
@@ -238,6 +265,7 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
         if (s_progress_callback) {
             s_progress_callback(written, size, s_progress_user_data);
         }
+        storage_unlock();
         return ESP_FAIL;
     }
 
@@ -245,6 +273,7 @@ esp_err_t gif_storage_write(const char* filename, const uint8_t* data, size_t si
     if (s_progress_callback) {
         s_progress_callback(size, size, s_progress_user_data);
     }
+    storage_unlock();
     return ESP_OK;
 }
 
@@ -256,8 +285,11 @@ bool gif_storage_exists(const char* filename) {
     char filepath[256];
     snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, filename);
 
+    storage_lock();
     struct stat st;
-    return (stat(filepath, &st) == 0);
+    int ret = stat(filepath, &st);
+    storage_unlock();
+    return (ret == 0);
 }
 
 esp_err_t gif_storage_list(gif_storage_list_callback_t callback, void* user_data) {
@@ -288,7 +320,10 @@ esp_err_t gif_storage_list(gif_storage_list_callback_t callback, void* user_data
         char filepath[512];
         snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, entry->d_name);
         struct stat st;
-        if (stat(filepath, &st) == 0) {
+        storage_lock();
+        int stat_res = stat(filepath, &st);
+        storage_unlock();
+        if (stat_res == 0) {
             time_t upload_time = st.st_mtime;
             if (gif_storage_get_upload_time(entry->d_name, &upload_time) != ESP_OK) {
                 upload_time = st.st_mtime;
@@ -321,13 +356,18 @@ esp_err_t gif_storage_delete(const char* filename) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    storage_lock();
+
     char filepath[256];
     snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_BASE_PATH, filename);
 
     if (unlink(filepath) != 0) {
         ESP_LOGE(TAG, "Failed to delete file: %s", filename);
+        storage_unlock();
         return ESP_FAIL;
     }
+
+    storage_unlock();
 
     gif_storage_set_upload_time(filename, 0);
 
@@ -352,13 +392,17 @@ esp_err_t gif_storage_set_upload_time(const char* filename, time_t upload_time) 
     build_meta_path(filename, meta_path, sizeof(meta_path));
 
     if (upload_time <= 0) {
+        storage_lock();
         unlink(meta_path);
+        storage_unlock();
         return ESP_OK;
     }
 
+    storage_lock();
     FILE* f = fopen(meta_path, "wb");
     if (!f) {
         ESP_LOGW(TAG, "Failed to open meta file: %s", meta_path);
+        storage_unlock();
         return ESP_FAIL;
     }
 
@@ -366,10 +410,12 @@ esp_err_t gif_storage_set_upload_time(const char* filename, time_t upload_time) 
         ESP_LOGW(TAG, "Failed to write meta file: %s", meta_path);
         fclose(f);
         unlink(meta_path);
+        storage_unlock();
         return ESP_FAIL;
     }
 
     fclose(f);
+    storage_unlock();
     return ESP_OK;
 }
 
@@ -381,14 +427,17 @@ esp_err_t gif_storage_get_upload_time(const char* filename, time_t* upload_time)
     char meta_path[256];
     build_meta_path(filename, meta_path, sizeof(meta_path));
 
+    storage_lock();
     FILE* f = fopen(meta_path, "rb");
     if (!f) {
+        storage_unlock();
         return ESP_FAIL;
     }
 
     time_t stored_time = 0;
     size_t read_items = fread(&stored_time, sizeof(stored_time), 1, f);
     fclose(f);
+    storage_unlock();
 
     if (read_items != 1) {
         return ESP_FAIL;

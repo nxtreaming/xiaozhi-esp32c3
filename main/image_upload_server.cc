@@ -15,6 +15,7 @@
 #include <cstdio>
 
 #include "storage/gif_storage.h"
+#include "offline_image_manager.h"
 
 #define TAG "ImageUploadServer"
 
@@ -611,6 +612,8 @@ esp_err_t ImageUploadServer::DeleteFileHandler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
         return ret;
     }
+
+    OfflineImageManager::GetInstance().RefreshImageList(true);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"deleted\":true}", HTTPD_RESP_USE_STRLEN);

@@ -88,6 +88,9 @@ public:
      */
     bool GetStorageInfo(size_t& total_bytes, size_t& used_bytes);
 
+    void RefreshImageList(bool show_update_message = false);
+    void ShowUploadServiceInfo(const std::string& status_prefix);
+
     /**
      * @brief 按键控制处理
      * 循环切换功能：启动服务 -> 显示图片列表 -> 显示下一张图片 -> ... -> 停止服务

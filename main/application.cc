@@ -1780,6 +1780,7 @@ bool Application::StartImageUploadServer(const std::string& ssid_prefix) {
                 ESP_LOGI(TAG, "Image saved to storage: %s", filename_copy.c_str());
                 upload_server.NotifyStorageResult(true, "上传并保存成功");
                 gif_storage_set_upload_time(filename_copy.c_str(), upload_time_copy);
+                OfflineImageManager::GetInstance().RefreshImageList(true);
 
                 Schedule([this, filename_copy]() {
                     auto display = Board::GetInstance().GetDisplay();

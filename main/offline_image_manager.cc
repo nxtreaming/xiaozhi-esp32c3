@@ -43,31 +43,8 @@ bool OfflineImageManager::StartImageUploadService(const std::string& ssid_prefix
         // Stop any running slideshow
         app.StopSlideShow();
 
-        // Build center-screen message: server info + current GIF files
-        std::string info = app.GetImageUploadServerInfo();
-        auto images = GetStoredImages();
-        std::string message = "图片上传服务已启动\n" + info + "\n\n";
-        if (images.empty()) {
-            message += "当前没有GIF文件";
-        } else {
-            message += "当前GIF文件（共" + std::to_string(images.size()) + "个）:\n";
-            for (const auto& img : images) {
-                size_t kb = (img.size + 1023) / 1024;
-                message += "- " + img.filename + " (" + std::to_string(kb) + " KB)\n";
-            }
-        }
-
-        // Update UI in UI context: hide GIF and show centered message
-        app.Schedule([message]() {
-            auto display = Board::GetInstance().GetDisplay();
-            if (display) {
-                display->HideGif();
-                display->SetChatMessage("system", message.c_str());
-            }
-        });
-
-        // Keep status notification as before
-        ShowStatus("图片上传服务已启动\n" + info);
+        UpdateImageList();
+        ShowUploadServiceInfo("图片上传服务已启动");
         return true;
     } else {
         ShowStatus("图片上传服务启动失败");
@@ -153,16 +130,13 @@ static bool ShowStoredImageHelper(const std::string& filename) {
 
 bool OfflineImageManager::DeleteStoredImage(const std::string& filename) {
     ESP_LOGI(TAG, "Deleting stored image: %s", filename.c_str());
-    
+
     if (!gif_storage_exists(filename.c_str())) {
         ShowStatus("图片文件不存在: " + filename);
         return false;
     }
-    
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "/storage/%s", filename.c_str());
-    
-    if (unlink(filepath) == 0) {
+
+    if (gif_storage_delete(filename.c_str()) == ESP_OK) {
         UpdateImageList();
         ShowStatus("已删除图片: " + filename);
         return true;
@@ -174,28 +148,25 @@ bool OfflineImageManager::DeleteStoredImage(const std::string& filename) {
 
 int OfflineImageManager::ClearAllImages() {
     ESP_LOGI(TAG, "Clearing all stored images");
-    
+
     int deleted_count = 0;
     auto images = GetStoredImages();
-    
+
     for (const auto& image : images) {
-        char filepath[256];
-        snprintf(filepath, sizeof(filepath), "/storage/%s", image.filename.c_str());
-        
-        if (unlink(filepath) == 0) {
+        if (gif_storage_delete(image.filename.c_str()) == ESP_OK) {
             deleted_count++;
             ESP_LOGI(TAG, "Deleted: %s", image.filename.c_str());
         }
     }
-    
+
     UpdateImageList();
-    
+
     if (deleted_count > 0) {
         ShowStatus("已删除 " + std::to_string(deleted_count) + " 个图片文件");
     } else {
         ShowStatus("没有图片文件需要删除");
     }
-    
+
     return deleted_count;
 }
 
@@ -207,6 +178,39 @@ bool OfflineImageManager::GetStorageInfo(size_t& total_bytes, size_t& used_bytes
 void OfflineImageManager::UpdateImageList() {
     current_images_ = GetStoredImages();
     current_image_index_ = 0;
+}
+
+void OfflineImageManager::RefreshImageList(bool show_update_message) {
+    UpdateImageList();
+    if (show_update_message && button_state_ == ButtonState::SERVICE_RUNNING) {
+        ShowUploadServiceInfo("图片列表已更新");
+    }
+}
+
+void OfflineImageManager::ShowUploadServiceInfo(const std::string& status_prefix) {
+    auto& app = Application::GetInstance();
+    std::string info = app.GetImageUploadServerInfo();
+
+    std::string message = status_prefix + "\n" + info + "\n\n";
+    if (current_images_.empty()) {
+        message += "当前没有GIF文件";
+    } else {
+        message += "当前GIF文件（共" + std::to_string(current_images_.size()) + "个）:\n";
+        for (const auto& img : current_images_) {
+            size_t kb = (img.size + 1023) / 1024;
+            message += "- " + img.filename + " (" + std::to_string(kb) + " KB)\n";
+        }
+    }
+
+    app.Schedule([message]() {
+        auto display = Board::GetInstance().GetDisplay();
+        if (display) {
+            display->HideGif();
+            display->SetChatMessage("system", message.c_str());
+        }
+    });
+
+    ShowStatus(status_prefix + "\n" + info);
 }
 
 void OfflineImageManager::HandleButtonPress() {
