@@ -755,8 +755,8 @@ void Application::OnClockTimer()
 {
     clock_ticks_++;
 
-    // Print the debug info every 10 seconds
-    if (clock_ticks_ % 10 == 0)
+    // Print the debug info less frequently (every 60 seconds)
+    if (clock_ticks_ % 60 == 0)
     {
         // SystemInfo::PrintRealTimeStats(pdMS_TO_TICKS(1000));
         int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
