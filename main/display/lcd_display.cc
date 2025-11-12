@@ -19,6 +19,7 @@
 #include <freertos/task.h>
 #include <string.h>
 #include <lvgl.h>
+#include "power_save_timer.h"
 
 extern "C" {
 #include "storage/gif_storage.h"
@@ -1198,6 +1199,26 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
     Display::SetTheme(theme_name);
 }
 
+void LcdDisplay::AcquireGifPowerHold() {
+    if (gif_power_hold_acquired_) {
+        return;
+    }
+    if (auto timer = PowerSaveTimer::GetActiveTimer()) {
+        timer->AcquireHold();
+        gif_power_hold_acquired_ = true;
+    }
+}
+
+void LcdDisplay::ReleaseGifPowerHold() {
+    if (!gif_power_hold_acquired_) {
+        return;
+    }
+    if (auto timer = PowerSaveTimer::GetActiveTimer()) {
+        timer->ReleaseHold();
+    }
+    gif_power_hold_acquired_ = false;
+}
+
 void LcdDisplay::ShowGif(const uint8_t* gif_data, size_t gif_size, int x, int y) {
     // Execute LVGL operations on LVGL task to avoid cross-thread mutex issues
     struct Ctx { LcdDisplay* self; const uint8_t* data; size_t size; int x; int y; SemaphoreHandle_t done; };
@@ -1248,6 +1269,7 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
             if (!gif_controller_->IsPlaying()) {
                 gif_controller_->Start();
             }
+            AcquireGifPowerHold();
             SetGifPos(x, y);
             lv_obj_move_foreground(active_obj);
             ESP_LOGI(TAG, "GIF reused without restart");
@@ -1321,6 +1343,7 @@ void LcdDisplay::ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, i
     last_gif_data_ = gif_data;
     last_gif_size_ = gif_size;
     active_gif_view_ ^= 1u;
+    AcquireGifPowerHold();
 
     ESP_LOGI(TAG, "GIF started via LvglGif controller (official style)");
 
@@ -1356,6 +1379,7 @@ void LcdDisplay::HideGifImpl_() {
     if (gif_img_b_) {
         lv_obj_add_flag(gif_img_b_, LV_OBJ_FLAG_HIDDEN);
     }
+    ReleaseGifPowerHold();
     ESP_LOGI(TAG, "SPIRAM after Hide (paused): %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 }
@@ -1366,6 +1390,7 @@ void LcdDisplay::DestroyGif() {
         gif_controller_->Stop();
         gif_controller_.reset();
     }
+    ReleaseGifPowerHold();
     last_gif_data_ = nullptr;
     last_gif_size_ = 0;
     if (managed_gif_buffer_ != nullptr) {
@@ -1439,6 +1464,7 @@ void LcdDisplay::ShowGifWithManagedBuffer(uint8_t* gif_data, size_t gif_size, in
         if (gif_img_) { lv_obj_invalidate(gif_img_); }
     });
     gif_controller_->Start();
+    AcquireGifPowerHold();
     SetGifPos(x, y);
     lv_obj_clear_flag(gif_img_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(gif_img_);

@@ -46,6 +46,7 @@ protected:
     lv_obj_t* gif_img_b_ = nullptr;
     // Which image view currently active: 0 -> gif_img_, 1 -> gif_img_b_
     uint8_t active_gif_view_ = 0;
+    bool gif_power_hold_acquired_ = false;
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -97,6 +98,9 @@ private:
     // Run on LVGL task context implementations
     void ShowGifImpl_(const uint8_t* gif_data, size_t gif_size, int x, int y);
     void HideGifImpl_();
+
+    void AcquireGifPowerHold();
+    void ReleaseGifPowerHold();
 };
 
 // RGB LCD显示器

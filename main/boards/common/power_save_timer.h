@@ -15,6 +15,10 @@ public:
     void OnExitSleepMode(std::function<void()> callback);
     void OnShutdownRequest(std::function<void()> callback);
     void WakeUp();
+    void AcquireHold();
+    void ReleaseHold();
+
+    static PowerSaveTimer* GetActiveTimer();
 
 private:
     void PowerSaveCheck();
@@ -30,4 +34,9 @@ private:
     std::function<void()> on_enter_sleep_mode_;
     std::function<void()> on_exit_sleep_mode_;
     std::function<void()> on_shutdown_request_;
+
+    uint32_t hold_count_ = 0;
+    bool hold_prev_enabled_ = false;
+
+    static PowerSaveTimer* active_timer_;
 };

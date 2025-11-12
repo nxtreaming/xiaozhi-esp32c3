@@ -5,6 +5,8 @@
 
 #define TAG "PowerSaveTimer"
 
+PowerSaveTimer* PowerSaveTimer::active_timer_ = nullptr;
+
 
 PowerSaveTimer::PowerSaveTimer(int cpu_max_freq, int seconds_to_sleep, int seconds_to_shutdown)
     : cpu_max_freq_(cpu_max_freq), seconds_to_sleep_(seconds_to_sleep), seconds_to_shutdown_(seconds_to_shutdown) {
@@ -19,11 +21,15 @@ PowerSaveTimer::PowerSaveTimer(int cpu_max_freq, int seconds_to_sleep, int secon
         .skip_unhandled_events = true,
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &power_save_timer_));
+    active_timer_ = this;
 }
 
 PowerSaveTimer::~PowerSaveTimer() {
     esp_timer_stop(power_save_timer_);
     esp_timer_delete(power_save_timer_);
+    if (active_timer_ == this) {
+        active_timer_ = nullptr;
+    }
 }
 
 void PowerSaveTimer::SetEnabled(bool enabled) {
@@ -98,6 +104,35 @@ void PowerSaveTimer::WakeUp() {
 
         if (on_exit_sleep_mode_) {
             on_exit_sleep_mode_();
+        }
+    }
+}
+
+PowerSaveTimer* PowerSaveTimer::GetActiveTimer() {
+    return active_timer_;
+}
+
+void PowerSaveTimer::AcquireHold() {
+    if (hold_count_++ == 0) {
+        hold_prev_enabled_ = enabled_;
+        if (hold_prev_enabled_) {
+            SetEnabled(false);
+        } else {
+            WakeUp();
+        }
+    }
+}
+
+void PowerSaveTimer::ReleaseHold() {
+    if (hold_count_ == 0) {
+        return;
+    }
+    hold_count_--;
+    if (hold_count_ == 0) {
+        if (hold_prev_enabled_) {
+            SetEnabled(true);
+        } else {
+            WakeUp();
         }
     }
 }

@@ -30,6 +30,7 @@
 #include "image_upload_server.h"
 #include "storage/gif_storage.h"
 #include "offline_image_manager.h"
+#include "power_save_timer.h"
 #include "offline_image_manager.h"
 
 extern "C"{
@@ -1550,6 +1551,21 @@ void Application::SlideShowGeneric(bool from_url)
     slideshow_running_ = true;
 
     background_task_->Schedule([this, from_url]() {
+        struct TimerHoldGuard {
+            PowerSaveTimer* timer = nullptr;
+            TimerHoldGuard() {
+                timer = PowerSaveTimer::GetActiveTimer();
+                if (timer) {
+                    timer->AcquireHold();
+                }
+            }
+            ~TimerHoldGuard() {
+                if (timer) {
+                    timer->ReleaseHold();
+                }
+            }
+        } hold_guard;
+
         std::vector<std::string> gif_sources;
 
         if (from_url) {
